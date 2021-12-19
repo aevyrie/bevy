@@ -137,7 +137,7 @@ pub fn prepare_windows(
             height: window.physical_height,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             present_mode: if window.vsync {
-                wgpu::PresentMode::Fifo
+                wgpu::PresentMode::Mailbox
             } else {
                 wgpu::PresentMode::Immediate
             },
