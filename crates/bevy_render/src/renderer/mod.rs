@@ -1,7 +1,9 @@
+mod frame_pacing;
 mod graph_runner;
 mod render_device;
 
 use bevy_utils::tracing::{info, info_span};
+pub use frame_pacing::*;
 pub use graph_runner::*;
 pub use render_device::*;
 
@@ -28,6 +30,11 @@ pub fn render_system(world: &mut World) {
         world,
     )
     .unwrap();
+    // Wait to present this frame until the specified frame time has passed.
+    if let Some(frame_pacing) = world.get_resource::<FramePacing>().cloned() {
+        let frame_timer = world.get_resource_mut::<FrameTimer>().unwrap();
+        limit_framerate(&frame_pacing, frame_timer);
+    }
     {
         let span = info_span!("present_frames");
         let _guard = span.enter();

@@ -3,6 +3,7 @@ use bevy::prelude::*;
 fn main() {
     App::new()
         .insert_resource(Msaa { samples: 4 })
+        .insert_resource(FramePacing::new(60.0))
         .add_plugins(DefaultPlugins)
         .add_startup_system(setup)
         .run();

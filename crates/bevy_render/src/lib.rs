@@ -22,6 +22,7 @@ pub mod prelude {
         color::Color,
         mesh::{shape, Mesh},
         render_resource::Shader,
+        renderer::FramePacing,
         texture::Image,
         view::{ComputedVisibility, Msaa, Visibility},
     };
