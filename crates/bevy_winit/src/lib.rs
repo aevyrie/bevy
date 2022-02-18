@@ -241,16 +241,6 @@ pub fn winit_runner_with(mut app: App) {
     let event_handler = move |event: Event<()>,
                               event_loop: &EventLoopWindowTarget<()>,
                               control_flow: &mut ControlFlow| {
-        if let Some(app_exit_events) = app.world.get_resource_mut::<Events<AppExit>>() {
-            if app_exit_event_reader
-                .iter(&app_exit_events)
-                .next_back()
-                .is_some()
-            {
-                *control_flow = ControlFlow::Exit;
-            }
-        }
-
         match event {
             event::Event::WindowEvent {
                 event,
@@ -380,7 +370,7 @@ pub fn winit_runner_with(mut app: App) {
                         char_input_events.send(ReceivedCharacter {
                             id: window_id,
                             char: c,
-                        })
+                        });
                     }
                     WindowEvent::ScaleFactorChanged {
                         scale_factor,
@@ -498,13 +488,26 @@ pub fn winit_runner_with(mut app: App) {
                 active = true;
             }
             event::Event::MainEventsCleared => {
-                // Don't use `Event::RedrawRequested(id)`, because it will be generated for each window.
+                handle_create_window_events(
+                    &mut app.world,
+                    event_loop,
+                    &mut create_window_event_reader,
+                );
+                match control_flow {
+                    ControlFlow::Poll => {
+                        if active {
+                            // We only need to update conditionally when in Poll mode.
+                            app.update();
+                        }
+                    }
+                    _ => app.update(),
+                }
+            }
+            Event::RedrawEventsCleared => {
                 *control_flow = config_control_flow;
-                // Force a winit redraw by setting the control flow to `Poll`, even if it is currently set
-                // to `Wait`. Every time the event handler loops, it resets the control_flow to
-                // match the user-defined [`WinitConfig`] in the line above. This ensures we always
-                // respect the user choice, but override it when a redraw is needed.
-                // Why this is required: https://github.com/rust-windowing/winit/issues/1619
+                // This needs to run after the app update in `MainEventsCleared`, so we can see if
+                // any redraw events were generated this frame. Otherwise we won't be able to see
+                // redraw requests until the next event, defeating the purpose of a redraw request!
                 if let Some(app_redraw_events) =
                     app.world.get_resource_mut::<Events<RequestRedraw>>()
                 {
@@ -514,20 +517,25 @@ pub fn winit_runner_with(mut app: App) {
                         .is_some()
                     {
                         *control_flow = ControlFlow::Poll;
+                        if !active {
+                            app.update();
+                        }
                     }
                 }
-                handle_create_window_events(
-                    &mut app.world,
-                    event_loop,
-                    &mut create_window_event_reader,
-                );
-                if active {
-                    app.update();
+                if let Some(app_exit_events) = app.world.get_resource_mut::<Events<AppExit>>() {
+                    if app_exit_event_reader
+                        .iter(&app_exit_events)
+                        .next_back()
+                        .is_some()
+                    {
+                        *control_flow = ControlFlow::Exit;
+                    }
                 }
             }
             _ => (),
         }
     };
+
     if should_return_from_run {
         run_return(&mut event_loop, event_handler);
     } else {
