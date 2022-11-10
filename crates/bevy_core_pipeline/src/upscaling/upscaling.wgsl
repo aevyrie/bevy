@@ -9,5 +9,18 @@ var hdr_sampler: sampler;
 fn fs_main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let hdr_color = textureSample(hdr_texture, hdr_sampler, in.uv);
 
-    return hdr_color;
+    var output_rgb = pow(hdr_color.rgb, vec3<f32>(1.0 / 2.2));
+
+    // Source: Advanced VR Rendering, GDC 2015, Alex Vlachos, Valve, Slide 49
+    // https://media.steampowered.com/apps/valve/2015/Alex_Vlachos_Advanced_VR_Rendering_GDC2015.pdf
+    var dither = vec3<f32>(dot(vec2<f32>(171.0, 231.0), in.position.xy)).xxx;
+    dither = fract(dither.rgb / vec3<f32>(103.0, 71.0, 97.0));
+    dither = dither / 255.0;
+    output_rgb = output_rgb + dither;
+
+    // This conversion back to linear space is required because our output texture format is
+    // SRGB; the GPU will assume our output is linear and will apply an SRGB conversion.
+    output_rgb = pow(output_rgb.rgb, vec3<f32>(2.2));
+
+    return vec4<f32>(output_rgb.rgb, hdr_color.a);
 }
