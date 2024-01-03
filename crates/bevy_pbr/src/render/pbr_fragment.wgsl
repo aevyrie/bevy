@@ -175,7 +175,7 @@ fn pbr_input_from_standard_material(
         let ssao_multibounce = gtao_multibounce(ssao, pbr_input.material.base_color.rgb);
         diffuse_occlusion = min(diffuse_occlusion, ssao_multibounce);
         // Use ssao to estimate the specular occlusion. [Lagarde et al., 2014]
-        specular_occlusion =  clamp(pow(NdotV + ssao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ssao, 0.0, 1.0);
+        specular_occlusion =  saturate(pow(NdotV + ssao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ssao);
 #endif
         pbr_input.diffuse_occlusion = diffuse_occlusion;
         pbr_input.specular_occlusion = specular_occlusion;
