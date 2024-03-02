@@ -160,15 +160,6 @@ impl Plugin for WinitPlugin {
     }
 }
 
-trait AppSendEvent {
-    fn send(&mut self, event: impl Into<WinitEvent>);
-}
-impl AppSendEvent for Vec<WinitEvent> {
-    fn send(&mut self, event: impl Into<WinitEvent>) {
-        self.push(Into::<WinitEvent>::into(event));
-    }
-}
-
 /// Persistent state that is used to run the [`App`] according to the current
 /// [`UpdateMode`].
 struct WinitAppRunnerState {
@@ -272,6 +263,7 @@ pub fn winit_runner(mut app: App) {
 
     let mut event_writer_system_state: SystemState<(
         EventWriter<WindowResized>,
+        EventWriter<WinitEvent>,
         NonSend<WinitWindows>,
         Query<(&mut Window, &mut CachedWindow)>,
         NonSend<AccessKitAdapters>,
@@ -279,7 +271,6 @@ pub fn winit_runner(mut app: App) {
 
     let mut create_window =
         SystemState::<CreateWindowParams<Added<Window>>>::from_world(&mut app.world);
-    let mut winit_events = Vec::default();
     // set up the event loop
     let event_handler = move |event, event_loop: &EventLoopWindowTarget<()>| {
         handle_winit_event(
@@ -290,7 +281,6 @@ pub fn winit_runner(mut app: App) {
             &mut event_writer_system_state,
             &mut focused_windows_state,
             &mut redraw_event_reader,
-            &mut winit_events,
             event,
             event_loop,
         );
@@ -311,13 +301,13 @@ fn handle_winit_event(
     create_window: &mut SystemState<CreateWindowParams<Added<Window>>>,
     event_writer_system_state: &mut SystemState<(
         EventWriter<WindowResized>,
+        EventWriter<WinitEvent>,
         NonSend<WinitWindows>,
         Query<(&mut Window, &mut CachedWindow)>,
         NonSend<AccessKitAdapters>,
     )>,
     focused_windows_state: &mut SystemState<(Res<WinitSettings>, Query<&Window>)>,
     redraw_event_reader: &mut ManualEventReader<RequestRedraw>,
-    winit_events: &mut Vec<WinitEvent>,
     event: Event<()>,
     event_loop: &EventLoopWindowTarget<()>,
 ) {
@@ -378,7 +368,7 @@ fn handle_winit_event(
 
             if should_update {
                 let visible = windows.iter().any(|window| window.visible);
-                let (_, winit_windows, _, _) = event_writer_system_state.get_mut(&mut app.world);
+                let (_, _, winit_windows, _, _) = event_writer_system_state.get_mut(&mut app.world);
                 if visible && runner_state.active != ActiveState::WillSuspend {
                     for window in winit_windows.windows.values() {
                         window.request_redraw();
@@ -394,7 +384,6 @@ fn handle_winit_event(
                         create_window,
                         app_exit_event_reader,
                         redraw_event_reader,
-                        winit_events,
                     );
                     if runner_state.active != ActiveState::Suspended {
                         event_loop.set_control_flow(ControlFlow::Poll);
@@ -412,8 +401,13 @@ fn handle_winit_event(
         Event::WindowEvent {
             event, window_id, ..
         } => {
-            let (mut window_resized, winit_windows, mut windows, access_kit_adapters) =
-                event_writer_system_state.get_mut(&mut app.world);
+            let (
+                mut window_resized,
+                mut winit_events,
+                winit_windows,
+                mut windows,
+                access_kit_adapters,
+            ) = event_writer_system_state.get_mut(&mut app.world);
 
             let Some(window) = winit_windows.get_window_entity(window_id) else {
                 warn!("Skipped event {event:?} for unknown winit Window Id {window_id:?}");
@@ -439,15 +433,17 @@ fn handle_winit_event(
                 WindowEvent::Resized(size) => {
                     react_to_resize(&mut win, size, &mut window_resized, window);
                 }
-                WindowEvent::CloseRequested => winit_events.send(WindowCloseRequested { window }),
+                WindowEvent::CloseRequested => {
+                    winit_events.send(WindowCloseRequested { window }.into());
+                }
                 WindowEvent::KeyboardInput { ref event, .. } => {
                     if event.state.is_pressed() {
                         if let Some(char) = &event.text {
                             let char = char.clone();
-                            winit_events.send(ReceivedCharacter { window, char });
+                            winit_events.send(ReceivedCharacter { window, char }.into());
                         }
                     }
-                    winit_events.send(converters::convert_keyboard_input(event, window));
+                    winit_events.send(converters::convert_keyboard_input(event, window).into());
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     let physical_position = DVec2::new(position.x, position.y);
@@ -460,55 +456,68 @@ fn handle_winit_event(
                     win.set_physical_cursor_position(Some(physical_position));
                     let position =
                         (physical_position / win.resolution.scale_factor() as f64).as_vec2();
-                    winit_events.send(CursorMoved {
-                        window,
-                        position,
-                        delta,
-                    });
+                    winit_events.send(
+                        CursorMoved {
+                            window,
+                            position,
+                            delta,
+                        }
+                        .into(),
+                    );
                 }
                 WindowEvent::CursorEntered { .. } => {
-                    winit_events.send(CursorEntered { window });
+                    winit_events.send(CursorEntered { window }.into());
                 }
                 WindowEvent::CursorLeft { .. } => {
                     win.set_physical_cursor_position(None);
-                    winit_events.send(CursorLeft { window });
+                    winit_events.send(CursorLeft { window }.into());
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
-                    winit_events.send(MouseButtonInput {
-                        button: converters::convert_mouse_button(button),
-                        state: converters::convert_element_state(state),
-                        window,
-                    });
+                    winit_events.send(
+                        MouseButtonInput {
+                            button: converters::convert_mouse_button(button),
+                            state: converters::convert_element_state(state),
+                            window,
+                        }
+                        .into(),
+                    );
                 }
                 WindowEvent::TouchpadMagnify { delta, .. } => {
-                    winit_events.send(TouchpadMagnify(delta as f32));
+                    winit_events.send(TouchpadMagnify(delta as f32).into());
                 }
                 WindowEvent::TouchpadRotate { delta, .. } => {
-                    winit_events.send(TouchpadRotate(delta));
+                    winit_events.send(TouchpadRotate(delta).into());
                 }
                 WindowEvent::MouseWheel { delta, .. } => match delta {
                     event::MouseScrollDelta::LineDelta(x, y) => {
-                        winit_events.send(MouseWheel {
-                            unit: MouseScrollUnit::Line,
-                            x,
-                            y,
-                            window,
-                        });
+                        winit_events.send(
+                            MouseWheel {
+                                unit: MouseScrollUnit::Line,
+                                x,
+                                y,
+                                window,
+                            }
+                            .into(),
+                        );
                     }
                     event::MouseScrollDelta::PixelDelta(p) => {
-                        winit_events.send(MouseWheel {
-                            unit: MouseScrollUnit::Pixel,
-                            x: p.x as f32,
-                            y: p.y as f32,
-                            window,
-                        });
+                        winit_events.send(
+                            MouseWheel {
+                                unit: MouseScrollUnit::Pixel,
+                                x: p.x as f32,
+                                y: p.y as f32,
+                                window,
+                            }
+                            .into(),
+                        );
                     }
                 },
                 WindowEvent::Touch(touch) => {
                     let location = touch
                         .location
                         .to_logical(win.resolution.scale_factor() as f64);
-                    winit_events.send(converters::convert_touch_input(touch, location, window));
+                    winit_events
+                        .send(converters::convert_touch_input(touch, location, window).into());
                 }
                 WindowEvent::ScaleFactorChanged {
                     scale_factor,
@@ -543,72 +552,87 @@ fn handle_winit_event(
                     win.resolution
                         .set_physical_resolution(new_inner_size.width, new_inner_size.height);
 
-                    winit_events.send(WindowBackendScaleFactorChanged {
-                        window,
-                        scale_factor,
-                    });
-                    if scale_factor_override.is_none() && !relative_eq!(new_factor, prior_factor) {
-                        winit_events.send(WindowScaleFactorChanged {
+                    winit_events.send(
+                        WindowBackendScaleFactorChanged {
                             window,
                             scale_factor,
-                        });
+                        }
+                        .into(),
+                    );
+                    if scale_factor_override.is_none() && !relative_eq!(new_factor, prior_factor) {
+                        winit_events.send(
+                            WindowScaleFactorChanged {
+                                window,
+                                scale_factor,
+                            }
+                            .into(),
+                        );
                     }
 
                     if !width_equal || !height_equal {
-                        winit_events.send(WindowResized {
-                            window,
-                            width: new_logical_width,
-                            height: new_logical_height,
-                        });
+                        winit_events.send(
+                            WindowResized {
+                                window,
+                                width: new_logical_width,
+                                height: new_logical_height,
+                            }
+                            .into(),
+                        );
                     }
                 }
                 WindowEvent::Focused(focused) => {
                     win.focused = focused;
-                    winit_events.send(WindowFocused { window, focused });
+                    winit_events.send(WindowFocused { window, focused }.into());
                 }
                 WindowEvent::Occluded(occluded) => {
-                    winit_events.send(WindowOccluded { window, occluded });
+                    winit_events.send(WindowOccluded { window, occluded }.into());
                 }
                 WindowEvent::DroppedFile(path_buf) => {
-                    winit_events.send(FileDragAndDrop::DroppedFile { window, path_buf });
+                    winit_events.send(FileDragAndDrop::DroppedFile { window, path_buf }.into());
                 }
                 WindowEvent::HoveredFile(path_buf) => {
-                    winit_events.send(FileDragAndDrop::HoveredFile { window, path_buf });
+                    winit_events.send(FileDragAndDrop::HoveredFile { window, path_buf }.into());
                 }
                 WindowEvent::HoveredFileCancelled => {
-                    winit_events.send(FileDragAndDrop::HoveredFileCanceled { window });
+                    winit_events.send(FileDragAndDrop::HoveredFileCanceled { window }.into());
                 }
                 WindowEvent::Moved(position) => {
                     let position = ivec2(position.x, position.y);
                     win.position.set(position);
-                    winit_events.send(WindowMoved { window, position });
+                    winit_events.send(WindowMoved { window, position }.into());
                 }
                 WindowEvent::Ime(event) => match event {
                     event::Ime::Preedit(value, cursor) => {
-                        winit_events.send(Ime::Preedit {
-                            window,
-                            value,
-                            cursor,
-                        });
+                        winit_events.send(
+                            Ime::Preedit {
+                                window,
+                                value,
+                                cursor,
+                            }
+                            .into(),
+                        );
                     }
                     event::Ime::Commit(value) => {
-                        winit_events.send(Ime::Commit { window, value });
+                        winit_events.send(Ime::Commit { window, value }.into());
                     }
                     event::Ime::Enabled => {
-                        winit_events.send(Ime::Enabled { window });
+                        winit_events.send(Ime::Enabled { window }.into());
                     }
                     event::Ime::Disabled => {
-                        winit_events.send(Ime::Disabled { window });
+                        winit_events.send(Ime::Disabled { window }.into());
                     }
                 },
                 WindowEvent::ThemeChanged(theme) => {
-                    winit_events.send(WindowThemeChanged {
-                        window,
-                        theme: convert_winit_theme(theme),
-                    });
+                    winit_events.send(
+                        WindowThemeChanged {
+                            window,
+                            theme: convert_winit_theme(theme),
+                        }
+                        .into(),
+                    );
                 }
                 WindowEvent::Destroyed => {
-                    winit_events.send(WindowDestroyed { window });
+                    winit_events.send(WindowDestroyed { window }.into());
                 }
                 WindowEvent::RedrawRequested => {
                     run_app_update_if_should(
@@ -619,7 +643,6 @@ fn handle_winit_event(
                         create_window,
                         app_exit_event_reader,
                         redraw_event_reader,
-                        winit_events,
                     );
                 }
                 _ => {}
@@ -635,12 +658,14 @@ fn handle_winit_event(
         Event::DeviceEvent { event, .. } => {
             runner_state.device_event_received = true;
             if let DeviceEvent::MouseMotion { delta: (x, y) } = event {
+                let (_, mut winit_events, ..) = event_writer_system_state.get_mut(&mut app.world);
                 let delta = Vec2::new(x as f32, y as f32);
-                winit_events.send(MouseMotion { delta });
+                winit_events.send(MouseMotion { delta }.into());
             }
         }
         Event::Suspended => {
-            winit_events.send(ApplicationLifetime::Suspended);
+            let (_, mut winit_events, ..) = event_writer_system_state.get_mut(&mut app.world);
+            winit_events.send(ApplicationLifetime::Suspended.into());
             // Mark the state as `WillSuspend`. This will let the schedule run one last time
             // before actually suspending to let the application react
             runner_state.active = ActiveState::WillSuspend;
@@ -654,9 +679,14 @@ fn handle_winit_event(
                 }
             }
 
+            let (_, mut winit_events, ..) = event_writer_system_state.get_mut(&mut app.world);
             match runner_state.active {
-                ActiveState::NotYetStarted => winit_events.send(ApplicationLifetime::Started),
-                _ => winit_events.send(ApplicationLifetime::Resumed),
+                ActiveState::NotYetStarted => {
+                    winit_events.send(ApplicationLifetime::Started.into());
+                }
+                _ => {
+                    winit_events.send(ApplicationLifetime::Resumed.into());
+                }
             }
             runner_state.active = ActiveState::Active;
             runner_state.redraw_requested = true;
@@ -700,14 +730,8 @@ fn handle_winit_event(
         }
         _ => (),
     }
-
-    // We drain events after every received winit event in addition to on app update to ensure
-    // the work of pushing events into event queues is spread out over time in case the app becomes
-    // dormant for a long stretch.
-    forward_winit_events(winit_events, app);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_app_update_if_should(
     runner_state: &mut WinitAppRunnerState,
     app: &mut App,
@@ -716,16 +740,12 @@ fn run_app_update_if_should(
     create_window: &mut SystemState<CreateWindowParams<Added<Window>>>,
     app_exit_event_reader: &mut ManualEventReader<AppExit>,
     redraw_event_reader: &mut ManualEventReader<RequestRedraw>,
-    winit_events: &mut Vec<WinitEvent>,
 ) {
     runner_state.reset_on_update();
 
     if !runner_state.active.should_run() {
         return;
     }
-
-    forward_winit_events(winit_events, app);
-
     if runner_state.active == ActiveState::WillSuspend {
         runner_state.active = ActiveState::Suspended;
         #[cfg(target_os = "android")]
