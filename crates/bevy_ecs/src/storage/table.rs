@@ -152,7 +152,7 @@ pub struct Column {
     data: BlobVec,
     added_ticks: Vec<UnsafeCell<Tick>>,
     changed_ticks: Vec<UnsafeCell<Tick>>,
-    callers: Vec<UnsafeCell<core::panic::Location<'static>>>,
+    callers: Vec<UnsafeCell<&'static core::panic::Location<'static>>>,
 }
 
 impl Column {
@@ -186,7 +186,7 @@ impl Column {
         row: TableRow,
         data: OwningPtr<'_>,
         tick: Tick,
-        caller: core::panic::Location<'static>,
+        caller: &'static core::panic::Location<'static>,
     ) {
         debug_assert!(row.as_usize() < self.len());
         self.data.initialize_unchecked(row.as_usize(), data);
@@ -209,7 +209,7 @@ impl Column {
         row: TableRow,
         data: OwningPtr<'_>,
         change_tick: Tick,
-        caller: core::panic::Location<'static>,
+        caller: &'static core::panic::Location<'static>,
     ) {
         debug_assert!(row.as_usize() < self.len());
         self.data.replace_unchecked(row.as_usize(), data);
@@ -269,7 +269,7 @@ impl Column {
     ) -> (
         OwningPtr<'_>,
         ComponentTicks,
-        core::panic::Location<'static>,
+        &'static core::panic::Location<'static>,
     ) {
         let data = self.data.swap_remove_and_forget_unchecked(row.as_usize());
         let added = self.added_ticks.swap_remove(row.as_usize()).into_inner();
@@ -315,7 +315,7 @@ impl Column {
         &mut self,
         ptr: OwningPtr<'_>,
         ticks: ComponentTicks,
-        caller: core::panic::Location<'static>,
+        caller: &'static core::panic::Location<'static>,
     ) {
         self.data.push(ptr);
         self.added_ticks.push(UnsafeCell::new(ticks.added));
@@ -379,7 +379,7 @@ impl Column {
     /// Users of this API must ensure that accesses to each individual element
     /// adhere to the safety invariants of [`UnsafeCell`].
     #[inline]
-    pub fn get_callers_slice(&self) -> &[UnsafeCell<core::panic::Location<'static>>] {
+    pub fn get_callers_slice(&self) -> &[UnsafeCell< &'static core::panic::Location<'static>>] {
         &self.callers
     }
 
@@ -393,7 +393,7 @@ impl Column {
     ) -> Option<(
         Ptr<'_>,
         TickCells<'_>,
-        &UnsafeCell<core::panic::Location<'static>>,
+        &UnsafeCell<&'static core::panic::Location<'static>>,
     )> {
         (row.as_usize() < self.data.len())
             // SAFETY: The row is length checked before fetching the pointer. This is being
@@ -526,7 +526,7 @@ impl Column {
     pub unsafe fn get_caller_unchecked(
         &self,
         row: TableRow,
-    ) -> &UnsafeCell<core::panic::Location<'static>> {
+    ) -> &UnsafeCell<&'static core::panic::Location<'static>> {
         debug_assert!(row.as_usize() < self.callers.len());
         self.callers.get_unchecked(row.as_usize())
     }
@@ -806,7 +806,7 @@ impl Table {
             column.changed_ticks.push(UnsafeCell::new(Tick::new(0)));
             column
                 .callers
-                .push(UnsafeCell::new(*core::panic::Location::caller()));
+                .push(UnsafeCell::new(core::panic::Location::caller()));
         }
         TableRow::from_usize(index)
     }
@@ -1014,7 +1014,7 @@ mod tests {
                         row,
                         value_ptr,
                         Tick::new(0),
-                        *core::panic::Location::caller(),
+                        core::panic::Location::caller(),
                     );
                 });
             };

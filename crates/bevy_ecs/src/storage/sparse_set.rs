@@ -169,7 +169,7 @@ impl ComponentSparseSet {
         entity: Entity,
         value: OwningPtr<'_>,
         change_tick: Tick,
-        caller: core::panic::Location<'static>,
+        caller: &'static core::panic::Location<'static>,
     ) {
         if let Some(&dense_index) = self.sparse.get(entity.index()) {
             #[cfg(debug_assertions)]
@@ -230,7 +230,7 @@ impl ComponentSparseSet {
     ) -> Option<(
         Ptr<'_>,
         TickCells<'_>,
-        &UnsafeCell<core::panic::Location<'static>>,
+        &UnsafeCell<&'static core::panic::Location<'static>>,
     )> {
         let dense_index = *self.sparse.get(entity.index())?;
         #[cfg(debug_assertions)]

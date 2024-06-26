@@ -17,7 +17,7 @@ pub struct ResourceData<const SEND: bool> {
     type_name: String,
     id: ArchetypeComponentId,
     origin_thread_id: Option<ThreadId>,
-    caller: UnsafeCell<core::panic::Location<'static>>,
+    caller: UnsafeCell<&'static core::panic::Location<'static>>,
 }
 
 impl<const SEND: bool> Drop for ResourceData<SEND> {
@@ -115,7 +115,7 @@ impl<const SEND: bool> ResourceData<SEND> {
     ) -> Option<(
         Ptr<'_>,
         TickCells<'_>,
-        &UnsafeCell<core::panic::Location<'static>>,
+        &UnsafeCell<&'static core::panic::Location<'static>>,
     )> {
         self.is_present().then(|| {
             self.validate_access();
@@ -222,7 +222,7 @@ impl<const SEND: bool> ResourceData<SEND> {
     ) -> Option<(
         OwningPtr<'_>,
         ComponentTicks,
-        core::panic::Location<'static>,
+        &'static core::panic::Location<'static>,
     )> {
         if !self.is_present() {
             return None;
@@ -354,7 +354,7 @@ impl<const SEND: bool> Resources<SEND> {
                 type_name: String::from(component_info.name()),
                 id: f(),
                 origin_thread_id: None,
-                caller: UnsafeCell::new(*core::panic::Location::caller())
+                caller: UnsafeCell::new(core::panic::Location::caller())
             }
         })
     }

@@ -960,7 +960,7 @@ impl World {
             let mut bundle_spawner = BundleSpawner::new::<B>(self, change_tick);
             // SAFETY: bundle's type matches `bundle_info`, entity is allocated but non-existent
             unsafe {
-                bundle_spawner.spawn_non_existent(entity, bundle, *core::panic::Location::caller())
+                bundle_spawner.spawn_non_existent(entity, bundle, core::panic::Location::caller())
             }
         };
 
@@ -1801,7 +1801,7 @@ impl World {
                             spawner.spawn_non_existent(
                                 entity,
                                 bundle,
-                                *core::panic::Location::caller(),
+                                core::panic::Location::caller(),
                             )
                         };
                     } else {
@@ -1813,7 +1813,7 @@ impl World {
                             spawner.spawn_non_existent(
                                 entity,
                                 bundle,
-                                *core::panic::Location::caller(),
+                                core::panic::Location::caller(),
                             )
                         };
                         spawn_or_insert = SpawnOrInsert::Spawn(spawner);

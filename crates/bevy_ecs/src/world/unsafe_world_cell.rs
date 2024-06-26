@@ -541,7 +541,7 @@ impl<'w> UnsafeWorldCell<'w> {
     ) -> Option<(
         Ptr<'w>,
         TickCells<'w>,
-        &'w UnsafeCell<core::panic::Location<'static>>,
+        &'w UnsafeCell<&'static core::panic::Location<'static>>,
     )> {
         // SAFETY:
         // - caller ensures there is no `&mut World`
@@ -569,7 +569,7 @@ impl<'w> UnsafeWorldCell<'w> {
     ) -> Option<(
         Ptr<'w>,
         TickCells<'w>,
-        &'w UnsafeCell<core::panic::Location<'static>>,
+        &'w UnsafeCell<&'static core::panic::Location<'static>>,
     )> {
         // SAFETY:
         // - caller ensures there is no `&mut World`
@@ -983,7 +983,7 @@ unsafe fn get_component_and_ticks(
 ) -> Option<(
     Ptr<'_>,
     TickCells<'_>,
-    &UnsafeCell<core::panic::Location<'static>>,
+    &UnsafeCell<&'static core::panic::Location<'static>>,
 )> {
     match storage_type {
         StorageType::Table => {

@@ -387,7 +387,7 @@ impl BundleInfo {
         table_row: TableRow,
         change_tick: Tick,
         bundle: T,
-        caller: core::panic::Location<'static>,
+        caller: &'static core::panic::Location<'static>,
     ) {
         // NOTE: get_components calls this closure on each component in "bundle order".
         // bundle_info.component_ids are also in "bundle order"
@@ -648,7 +648,7 @@ impl<'w> BundleInserter<'w> {
         let add_bundle = self.add_bundle.as_ref();
         let table = self.table.as_mut();
         let archetype = self.archetype.as_mut();
-        let caller = *core::panic::Location::caller();
+        let caller = core::panic::Location::caller();
 
         let (new_archetype, new_location) = match &mut self.result {
             InsertBundleResult::SameArchetype => {
@@ -887,7 +887,7 @@ impl<'w> BundleSpawner<'w> {
         &mut self,
         entity: Entity,
         bundle: T,
-        caller: core::panic::Location<'static>,
+        caller: &'static core::panic::Location<'static>,
     ) -> EntityLocation {
         let table = self.table.as_mut();
         let archetype = self.archetype.as_mut();
@@ -938,7 +938,7 @@ impl<'w> BundleSpawner<'w> {
     pub unsafe fn spawn<T: Bundle>(
         &mut self,
         bundle: T,
-        caller: core::panic::Location<'static>,
+        caller: &'static core::panic::Location<'static>,
     ) -> Entity {
         let entity = self.entities().alloc();
         // SAFETY: entity is allocated (but non-existent), `T` matches this BundleInfo's type
