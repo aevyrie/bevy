@@ -3,7 +3,7 @@
 //! This is useful for making desktop applications, or any other program that doesn't need to be
 //! running the event loop non-stop.
 
-use bevy::window::WindowResolution;
+use bevy::window::{RequestRedraw, WindowResolution};
 use bevy::winit::WakeUp;
 use bevy::{
     prelude::*,
@@ -58,6 +58,7 @@ fn update_winit(
     mode: Res<ExampleMode>,
     mut winit_config: ResMut<WinitSettings>,
     event_loop_proxy: NonSend<EventLoopProxy<WakeUp>>,
+    mut redraw: EventWriter<RequestRedraw>,
 ) {
     use ExampleMode::*;
     *winit_config = match *mode {
@@ -85,13 +86,14 @@ fn update_winit(
             }
         }
         ApplicationWithRedraw => {
-            // Sending a `RequestRedraw` event is useful when you want the app to update the next
+            // Sending a `WakeUp` event is useful when you want the app to update the next
             // frame regardless of any user input. For example, your application might use
             // `WinitSettings::desktop_app()` to reduce power use, but UI animations need to play even
             // when there are no inputs, so you send redraw requests while the animation is playing.
             // Note that in this example the RequestRedraw winit event will make the app run in the same
             // way as continuous
-            let _ = event_loop_proxy.send_event(WakeUp);
+            // let _ = event_loop_proxy.send_event(WakeUp);
+            redraw.send(RequestRedraw);
             WinitSettings::desktop_app()
         }
     };

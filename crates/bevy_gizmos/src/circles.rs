@@ -212,7 +212,7 @@ where
             gizmos: self,
             radius,
             position,
-            rotation,
+            rotation: rotation.normalize(), // The quat may not be normalized, and cause a panic.
             color: color.into(),
             resolution: DEFAULT_CIRCLE_RESOLUTION,
         }
@@ -363,7 +363,12 @@ where
         Vec3::AXES.into_iter().for_each(|axis| {
             let normal = *rotation * axis;
             self.gizmos
-                .circle(*center, Dir3::new_unchecked(normal), *radius, *color)
+                .circle(
+                    *center,
+                    Dir3::new_unchecked(normal.normalize_or(Vec3::Y)),
+                    *radius,
+                    *color,
+                )
                 .resolution(*resolution);
         });
     }
