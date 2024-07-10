@@ -287,7 +287,7 @@ macro_rules! change_detection_impl {
 
             #[inline]
             fn changed_by(&self) -> &'static core::panic::Location<'static> {
-                *self.caller
+                self.caller
             }
         }
 
@@ -518,7 +518,7 @@ impl<'w> From<TicksMut<'w>> for Ticks<'w> {
 pub struct Res<'w, T: ?Sized + Resource> {
     pub(crate) value: &'w T,
     pub(crate) ticks: Ticks<'w>,
-    pub(crate) caller: &'w &'static core::panic::Location<'static>,
+    pub(crate) caller: &'static core::panic::Location<'static>,
 }
 
 impl<'w, T: Resource> Res<'w, T> {
@@ -688,7 +688,7 @@ impl<'w, T: 'static> From<NonSendMut<'w, T>> for Mut<'w, T> {
 pub struct Ref<'w, T: ?Sized> {
     pub(crate) value: &'w T,
     pub(crate) ticks: Ticks<'w>,
-    pub(crate) caller: &'w &'static core::panic::Location<'static>,
+    pub(crate) caller: &'static core::panic::Location<'static>,
 }
 
 impl<'w, T: ?Sized> Ref<'w, T> {
@@ -726,7 +726,7 @@ impl<'w, T: ?Sized> Ref<'w, T> {
         changed: &'w Tick,
         last_run: Tick,
         this_run: Tick,
-        caller: &'w &'static core::panic::Location<'static>,
+        caller: &'static core::panic::Location<'static>,
     ) -> Ref<'w, T> {
         Ref {
             value,
