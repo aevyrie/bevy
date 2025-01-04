@@ -3,7 +3,7 @@
 use bevy::{
     core_pipeline::{
         bloom::{Bloom, BloomCompositeMode},
-        tonemapping::Tonemapping,
+        tonemapping::{DebandDither, Tonemapping},
     },
     prelude::*,
 };
@@ -26,10 +26,12 @@ fn setup(
         Camera2d,
         Camera {
             hdr: true, // 1. HDR is required for bloom
+            clear_color: ClearColorConfig::Custom(Color::BLACK),
             ..default()
         },
         Tonemapping::TonyMcMapface, // 2. Using a tonemapper that desaturates to white is recommended
         Bloom::default(),           // 3. Enable bloom for the camera
+        DebandDither::Enabled,      // Optional: bloom causes gradients which cause banding
     ));
 
     // Sprite
