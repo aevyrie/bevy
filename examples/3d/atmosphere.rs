@@ -10,6 +10,7 @@ use bevy::{
         tonemapping::Tonemapping,
         Skybox,
     },
+    math::cubic_splines::LinearSpline,
     pbr::{light_consts::lux, Atmosphere, AtmosphereSettings, CascadeShadowConfigBuilder},
     prelude::*,
 };
@@ -45,10 +46,10 @@ fn setup_camera_fog(
             speed_darken: 20.0,
             metering_mask: metering_mask.clone(),
             compensation_curve: compensation_curves.add(
-                AutoExposureCompensationCurve::from_curve(CubicCardinalSpline::new(
-                    0.5,
-                    [vec2(-8.0, 1.0), vec2(4.0, -2.0)],
-                ))
+                AutoExposureCompensationCurve::from_curve(LinearSpline::new([
+                    vec2(-8.0, 0.5),
+                    vec2(4.0, -2.0),
+                ]))
                 .unwrap(),
             ),
             ..Default::default()
@@ -145,7 +146,7 @@ fn setup_terrain_scene(
         ),
         Transform::from_xyz(0.0, 0.1, 0.0)
             .with_scale(Vec3::splat(0.5))
-            .with_rotation(Quat::from_rotation_y(-0.1)),
+            .with_rotation(Quat::from_rotation_y(-0.15)),
     ));
 
     // Ocean
@@ -167,9 +168,9 @@ fn dynamic_scene(
     mut cams: Query<(&mut Transform, &mut ColorGrading), (Without<DirectionalLight>, With<Camera>)>,
     time: Res<Time>,
 ) {
-    let day_length_s = 60.0;
-    // Pause for a moment before animating to let things load, start a bit before sunrise:
-    let t = (time.elapsed_secs() - 1.0).max(0.0) + day_length_s * 0.8;
+    let day_length_s = 90.0;
+    // Pause for a moment before animating to let things load, start a bit before sunset:
+    let t = (time.elapsed_secs() - 1.0).max(0.0) + day_length_s * 0.3;
     let earth_tilt_rad = PI / 3.0;
     let day_fract = ((t % day_length_s) / day_length_s).clamp(0.0, 1.0);
 
@@ -188,7 +189,10 @@ fn dynamic_scene(
     }
     for (mut cam_transform, mut grading) in &mut cams {
         cam_transform.translation.z = -1.0 + 0.5 * ops::sin(-day_fract * PI * 2.0);
-        grading.global.temperature = (ops::sin(day_fract * PI * 2.0) * 0.05).min(0.0);
-        grading.global.post_saturation = (1.0 + ops::sin(day_fract * PI * 2.0) * 0.5).min(1.0);
+        // Cool color temp and desaturation at night:
+        let grade_amount = ops::sin(day_fract * PI * 2.0);
+        grading.global.temperature = (grade_amount * 0.08).min(0.0);
+        grading.global.tint = (-grade_amount * 0.05).max(0.0);
+        grading.global.post_saturation = (1.0 + grade_amount * 0.5).min(1.0);
     }
 }
