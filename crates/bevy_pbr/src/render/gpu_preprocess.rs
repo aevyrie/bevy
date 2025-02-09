@@ -836,7 +836,6 @@ impl Node for LateGpuPreprocessNode {
                 let Some(phase_work_item_buffers) =
                     work_item_buffers.get(&view.retained_view_entity)
                 else {
-                    warn!("The preprocessing index buffer wasn't present");
                     continue;
                 };
 
@@ -1677,35 +1676,35 @@ pub fn prepare_preprocess_bind_groups(
         return;
     };
 
-    for (phase_type_id, phase_item_instance_buffers) in phase_item_instance_buffers {
-        let BatchedPhaseItemInstanceBuffers {
-            data_buffer: ref data_buffer_vec,
-            ref work_item_buffers,
-            ref late_indexed_indirect_parameters_buffer,
-            ref late_non_indexed_indirect_parameters_buffer,
-        } = *phase_item_instance_buffers;
+    // Record whether we have any meshes that are to be drawn indirectly. If we
+    // don't, then we can skip building indirect parameters.
+    let mut any_indirect = false;
 
-        let Some(data_buffer) = data_buffer_vec.buffer() else {
-            continue;
-        };
+    // Loop over each view.
+    for (view_entity, view) in &views {
+        let mut bind_groups = TypeIdMap::default();
 
-        let Some(phase_indirect_parameters_buffers) =
-            indirect_parameters_buffers.buffers.get(phase_type_id)
-        else {
-            continue;
-        };
+        for (phase_type_id, phase_item_instance_buffers) in phase_item_instance_buffers {
+            let BatchedPhaseItemInstanceBuffers {
+                data_buffer: ref data_buffer_vec,
+                ref work_item_buffers,
+                ref late_indexed_indirect_parameters_buffer,
+                ref late_non_indexed_indirect_parameters_buffer,
+            } = *phase_item_instance_buffers;
 
-        // Record whether we have any meshes that are to be drawn indirectly. If we
-        // don't, then we can skip building indirect parameters.
-        let mut any_indirect = false;
-
-        // Loop over each view.
-        for (view_entity, view) in &views {
-            let Some(work_item_buffers) = work_item_buffers.get(&view.retained_view_entity) else {
+            let Some(data_buffer) = data_buffer_vec.buffer() else {
                 continue;
             };
 
-            let mut bind_groups = TypeIdMap::default();
+            let Some(phase_indirect_parameters_buffers) =
+                indirect_parameters_buffers.buffers.get(phase_type_id)
+            else {
+                continue;
+            };
+
+            let Some(work_item_buffers) = work_item_buffers.get(&view.retained_view_entity) else {
+                continue;
+            };
 
             // Create the `PreprocessBindGroupBuilder`.
             let preprocess_bind_group_builder = PreprocessBindGroupBuilder {
@@ -1766,24 +1765,24 @@ pub fn prepare_preprocess_bind_groups(
                 any_indirect = any_indirect || was_indirect;
                 bind_groups.insert(*phase_type_id, bind_group);
             }
-
-            // Save the bind groups.
-            commands
-                .entity(view_entity)
-                .insert(PreprocessBindGroups(bind_groups));
         }
 
-        // Now, if there were any indirect draw commands, create the bind groups for
-        // the indirect parameters building shader.
-        if any_indirect {
-            create_build_indirect_parameters_bind_groups(
-                &mut commands,
-                &render_device,
-                &pipelines,
-                current_input_buffer,
-                &indirect_parameters_buffers,
-            );
-        }
+        // Save the bind groups.
+        commands
+            .entity(view_entity)
+            .insert(PreprocessBindGroups(bind_groups));
+    }
+
+    // Now, if there were any indirect draw commands, create the bind groups for
+    // the indirect parameters building shader.
+    if any_indirect {
+        create_build_indirect_parameters_bind_groups(
+            &mut commands,
+            &render_device,
+            &pipelines,
+            current_input_buffer,
+            &indirect_parameters_buffers,
+        );
     }
 }
 

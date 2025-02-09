@@ -1000,9 +1000,6 @@ where
 
     /// Clears out the buffers in preparation for a new frame.
     pub fn clear(&mut self) {
-        self.current_input_buffer.clear();
-        self.previous_input_buffer.clear();
-
         // TODO: Don't do this.
         self.phase_item_instance_buffers.clear();
     }
