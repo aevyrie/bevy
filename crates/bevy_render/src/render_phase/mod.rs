@@ -43,7 +43,9 @@ use nonmax::NonMaxU32;
 pub use rangefinder::*;
 use wgpu::Features;
 
-use crate::batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport};
+use crate::batching::gpu_preprocessing::{
+    BatchedPhaseItemInstanceBuffers, BatchingPlugin, GpuPreprocessingMode, GpuPreprocessingSupport,
+};
 use crate::renderer::RenderDevice;
 use crate::sync_world::{MainEntity, MainEntityHashMap};
 use crate::view::RetainedViewEntity;
@@ -1026,10 +1028,14 @@ impl UnbatchableBinnedEntityIndexSet {
 ///
 /// This is the version used when the pipeline supports GPU preprocessing: e.g.
 /// 3D PBR meshes.
-pub struct BinnedRenderPhasePlugin<BPI, GFBD>(PhantomData<(BPI, GFBD)>)
+pub struct BinnedRenderPhasePlugin<BPI, GFBD>
 where
     BPI: BinnedPhaseItem,
-    GFBD: GetFullBatchData;
+    GFBD: GetFullBatchData,
+{
+    pub allow_copies_from_indirect_parameters: bool,
+    pub phantom: PhantomData<(BPI, GFBD)>,
+}
 
 impl<BPI, GFBD> Default for BinnedRenderPhasePlugin<BPI, GFBD>
 where
@@ -1037,7 +1043,10 @@ where
     GFBD: GetFullBatchData,
 {
     fn default() -> Self {
-        Self(PhantomData)
+        Self {
+            allow_copies_from_indirect_parameters: false,
+            phantom: PhantomData,
+        }
     }
 }
 
@@ -1111,10 +1120,14 @@ where
 ///
 /// This is the version used when the pipeline supports GPU preprocessing: e.g.
 /// 3D PBR meshes.
-pub struct SortedRenderPhasePlugin<SPI, GFBD>(PhantomData<(SPI, GFBD)>)
+pub struct SortedRenderPhasePlugin<SPI, GFBD>
 where
     SPI: SortedPhaseItem,
-    GFBD: GetFullBatchData;
+    GFBD: GetFullBatchData,
+{
+    pub allow_copies_from_indirect_parameters: bool,
+    pub phantom: PhantomData<(SPI, GFBD)>,
+}
 
 impl<SPI, GFBD> Default for SortedRenderPhasePlugin<SPI, GFBD>
 where
@@ -1122,7 +1135,10 @@ where
     GFBD: GetFullBatchData,
 {
     fn default() -> Self {
-        Self(PhantomData)
+        Self {
+            allow_copies_from_indirect_parameters: false,
+            phantom: PhantomData,
+        }
     }
 }
 

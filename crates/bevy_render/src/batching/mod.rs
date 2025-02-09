@@ -4,6 +4,7 @@ use bevy_ecs::{
     system::{ResMut, SystemParam, SystemParamItem},
 };
 use bytemuck::Pod;
+use gpu_preprocessing::PhaseIndirectParametersBuffers;
 use nonmax::NonMaxU32;
 
 use self::gpu_preprocessing::IndirectParametersBuffers;
@@ -171,7 +172,7 @@ pub trait GetFullBatchData: GetBatchData {
         indexed: bool,
         base_output_index: u32,
         batch_set_index: Option<NonMaxU32>,
-        indirect_parameters_buffers: &mut IndirectParametersBuffers,
+        indirect_parameters_buffers: &mut PhaseIndirectParametersBuffers,
         indirect_parameters_offset: u32,
     );
 }

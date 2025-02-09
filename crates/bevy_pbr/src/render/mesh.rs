@@ -43,7 +43,7 @@ use bevy_render::{
     Extract,
 };
 use bevy_transform::components::GlobalTransform;
-use bevy_utils::{default, Parallel};
+use bevy_utils::{default, Parallel, TypeIdMap};
 use core::mem::size_of;
 use material_bind_groups::MaterialBindingId;
 use render::skin::{self, SkinIndex};
@@ -242,8 +242,7 @@ impl Plugin for MeshRenderPlugin {
                     .init_resource::<RenderMeshInstanceGpuQueues>()
                     .add_systems(
                         ExtractSchedule,
-                        extract_meshes_for_gpu_building
-                            .in_set(ExtractMeshesSet),
+                        extract_meshes_for_gpu_building.in_set(ExtractMeshesSet),
                     )
                     .add_systems(
                         Render,
@@ -1571,9 +1570,7 @@ fn set_mesh_motion_vector_flags(
 /// mesh uniforms are built.
 pub fn collect_meshes_for_gpu_building(
     render_mesh_instances: ResMut<RenderMeshInstances>,
-    batched_instance_buffers: ResMut<
-        gpu_preprocessing::BatchedInstanceBuffers<MeshUniform, MeshInputUniform>,
-    >,
+    batched_instance_buffers: ResMut<gpu_preprocessing::BatchedInstanceBuffers<MeshInputUniform>>,
     mut mesh_culling_data_buffer: ResMut<MeshCullingDataBuffer>,
     mut render_mesh_instance_queues: ResMut<RenderMeshInstanceGpuQueues>,
     mesh_allocator: Res<MeshAllocator>,
@@ -2545,8 +2542,8 @@ impl SpecializedMeshPipeline for MeshPipeline {
 }
 
 /// Bind groups for meshes currently loaded.
-#[derive(Resource, Default)]
-pub struct MeshBindGroups {
+#[derive(Default)]
+pub struct MeshPhaseBindGroups {
     model_only: Option<BindGroup>,
     skinned: Option<MeshBindGroupPair>,
     morph_targets: HashMap<AssetId<Mesh>, MeshBindGroupPair>,
@@ -2558,13 +2555,17 @@ pub struct MeshBindGroupPair {
     no_motion_vectors: BindGroup,
 }
 
-impl MeshBindGroups {
+#[derive(Resource, Default)]
+pub struct MeshBindGroups(pub TypeIdMap<MeshPhaseBindGroups>);
+
+impl MeshPhaseBindGroups {
     pub fn reset(&mut self) {
         self.model_only = None;
         self.skinned = None;
         self.morph_targets.clear();
         self.lightmaps.clear();
     }
+
     /// Get the `BindGroup` for `RenderMesh` with given `handle_id` and lightmap
     /// key `lightmap`.
     pub fn get(
@@ -2615,23 +2616,58 @@ pub fn prepare_mesh_bind_group(
     weights_uniform: Res<MorphUniforms>,
     mut render_lightmaps: ResMut<RenderLightmaps>,
 ) {
-    groups.reset();
+    if let Some(cpu_batched_instance_buffer) = cpu_batched_instance_buffer {
+        if let Some(instance_data_binding) = cpu_batched_instance_buffer
+            .into_inner()
+            .instance_data_binding()
+        {
+            prepare_mesh_bind_group_for_phase(
+                instance_data_binding,
+                &meshes,
+                &mesh_pipeline,
+                &render_device,
+                &skins_uniform,
+                &weights_uniform,
+                &mut render_lightmaps,
+            );
+            return;
+        }
+    }
 
+    if let Some(gpu_batched_instance_buffers) = gpu_batched_instance_buffers {
+        for (phase_id, batched_phase_item_instance_buffers) in
+            &gpu_batched_instance_buffers.phase_item_instance_buffers
+        {
+            if let Some(instance_data_binding) =
+                batched_phase_item_instance_buffers.instance_data_binding()
+            {
+                prepare_mesh_bind_group_for_phase(
+                    instance_data_binding,
+                    &meshes,
+                    &mesh_pipeline,
+                    &render_device,
+                    &skins_uniform,
+                    &weights_uniform,
+                    &mut render_lightmaps,
+                )
+            }
+        }
+    }
+}
+
+fn prepare_mesh_bind_group_for_phase(
+    model: BindingResource,
+    meshes: &RenderAssets<RenderMesh>,
+    mesh_pipeline: &MeshPipeline,
+    render_device: &RenderDevice,
+    skins_uniform: &SkinUniforms,
+    weights_uniform: &MorphUniforms,
+    render_lightmaps: &mut RenderLightmaps,
+) -> MeshPhaseBindGroups {
     let layouts = &mesh_pipeline.mesh_layouts;
 
-    let model = if let Some(cpu_batched_instance_buffer) = cpu_batched_instance_buffer {
-        cpu_batched_instance_buffer
-            .into_inner()
-            .instance_data_binding()
-    } else if let Some(gpu_batched_instance_buffers) = gpu_batched_instance_buffers {
-        gpu_batched_instance_buffers
-            .into_inner()
-            .instance_data_binding()
-    } else {
-        return;
-    };
-    let Some(model) = model else { return };
-
+    // TODO: Reuse allocations.
+    let mut groups = MeshPhaseBindGroups::default();
     groups.model_only = Some(layouts.model_only(&render_device, &model));
 
     // Create the skinned mesh bind group with the current and previous buffers
