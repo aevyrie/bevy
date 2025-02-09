@@ -1,10 +1,8 @@
 //! Batching functionality when GPU preprocessing is in use.
 
 use core::any::TypeId;
-use std::marker::PhantomData;
 
 use bevy_app::{App, Plugin};
-use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     prelude::Entity,
     query::{Has, With},
@@ -164,6 +162,20 @@ where
     pub previous_input_buffer: InstanceInputUniformBuffer<BDI>,
 
     pub phase_item_instance_buffers: TypeIdMap<BatchedPhaseItemInstanceBuffers<BD>>,
+}
+
+impl<BD, BDI> Default for BatchedInstanceBuffers<BD, BDI>
+where
+    BD: GpuArrayBufferable + Sync + Send + 'static,
+    BDI: Pod + Sync + Send + Default + 'static,
+{
+    fn default() -> Self {
+        BatchedInstanceBuffers {
+            current_input_buffer: InstanceInputUniformBuffer::new(),
+            previous_input_buffer: InstanceInputUniformBuffer::new(),
+            phase_item_instance_buffers: HashMap::default(),
+        }
+    }
 }
 
 pub struct BatchedPhaseItemInstanceBuffers<BD>
@@ -983,11 +995,7 @@ where
 {
     /// Creates new buffers.
     pub fn new() -> Self {
-        BatchedInstanceBuffers {
-            current_input_buffer: InstanceInputUniformBuffer::new(),
-            previous_input_buffer: InstanceInputUniformBuffer::new(),
-            phase_item_instance_buffers: HashMap::default(),
-        }
+        Self::default()
     }
 
     /// Clears out the buffers in preparation for a new frame.
@@ -1137,7 +1145,7 @@ pub fn clear_batched_gpu_instance_buffers<GFBD>(
 /// This is a separate system from [`clear_batched_gpu_instance_buffers`]
 /// because [`ExtractedView`]s aren't created until after the extraction phase
 /// is completed.
-pub fn delete_old_work_item_buffers<PI, GFBD>(
+pub fn delete_old_work_item_buffers<GFBD>(
     mut gpu_batched_instance_buffers: ResMut<
         BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>,
     >,
@@ -1166,8 +1174,7 @@ pub fn delete_old_work_item_buffers<PI, GFBD>(
 /// trying to combine the draws into a batch.
 pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
     mut commands: Commands,
-    batched_instance_buffers: Res<BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>>,
-    mut indirect_parameters_buffers: Res<IndirectParametersBuffers>,
+    indirect_parameters_buffers: Res<IndirectParametersBuffers>,
     mut sorted_render_phases: ResMut<ViewSortedRenderPhases<I>>,
     mut views: Query<(
         &ExtractedView,
@@ -1337,8 +1344,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
 /// Creates batches for a render phase that uses bins.
 pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
     mut commands: Commands,
-    gpu_array_buffer: Res<BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>>,
-    mut indirect_parameters_buffers: Res<IndirectParametersBuffers>,
+    indirect_parameters_buffers: Res<IndirectParametersBuffers>,
     mut binned_render_phases: ResMut<ViewBinnedRenderPhases<BPI>>,
     mut views: Query<
         (

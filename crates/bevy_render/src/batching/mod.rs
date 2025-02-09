@@ -7,7 +7,6 @@ use bytemuck::Pod;
 use gpu_preprocessing::PhaseIndirectParametersBuffers;
 use nonmax::NonMaxU32;
 
-use self::gpu_preprocessing::IndirectParametersBuffers;
 use crate::{render_phase::PhaseItemExtraIndex, sync_world::MainEntity};
 use crate::{
     render_phase::{

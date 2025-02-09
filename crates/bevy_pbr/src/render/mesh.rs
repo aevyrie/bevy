@@ -21,7 +21,7 @@ use bevy_render::{
         gpu_preprocessing::{
             self, GpuPreprocessingSupport, IndirectBatchSet, IndirectParametersBuffers,
             IndirectParametersIndexed, IndirectParametersMetadata, IndirectParametersNonIndexed,
-            InstanceInputUniformBuffer,
+            InstanceInputUniformBuffer, PhaseIndirectParametersBuffers,
         },
         no_gpu_preprocessing, GetBatchData, GetFullBatchData, NoAutomaticBatching,
     },
@@ -44,6 +44,7 @@ use bevy_render::{
 };
 use bevy_transform::components::GlobalTransform;
 use bevy_utils::{default, Parallel, TypeIdMap};
+use core::any::TypeId;
 use core::mem::size_of;
 use material_bind_groups::MaterialBindingId;
 use render::skin::{self, SkinIndex};
@@ -238,7 +239,10 @@ impl Plugin for MeshRenderPlugin {
 
             if use_gpu_instance_buffer_builder {
                 render_app
-                    .init_resource::<gpu_preprocessing::BatchedInstanceBuffers<MeshUniform, MeshInputUniform>>()
+                    .init_resource::<gpu_preprocessing::BatchedInstanceBuffers<
+                        MeshUniform,
+                        MeshInputUniform
+                    >>()
                     .init_resource::<RenderMeshInstanceGpuQueues>()
                     .add_systems(
                         ExtractSchedule,
@@ -1570,7 +1574,9 @@ fn set_mesh_motion_vector_flags(
 /// mesh uniforms are built.
 pub fn collect_meshes_for_gpu_building(
     render_mesh_instances: ResMut<RenderMeshInstances>,
-    batched_instance_buffers: ResMut<gpu_preprocessing::BatchedInstanceBuffers<MeshInputUniform>>,
+    batched_instance_buffers: ResMut<
+        gpu_preprocessing::BatchedInstanceBuffers<MeshUniform, MeshInputUniform>,
+    >,
     mut mesh_culling_data_buffer: ResMut<MeshCullingDataBuffer>,
     mut render_mesh_instance_queues: ResMut<RenderMeshInstanceGpuQueues>,
     mesh_allocator: Res<MeshAllocator>,
@@ -1930,7 +1936,7 @@ impl GetFullBatchData for MeshPipeline {
         indexed: bool,
         base_output_index: u32,
         batch_set_index: Option<NonMaxU32>,
-        indirect_parameters_buffer: &mut IndirectParametersBuffers,
+        phase_indirect_parameters_buffers: &mut PhaseIndirectParametersBuffers,
         indirect_parameters_offset: u32,
     ) {
         let indirect_parameters = IndirectParametersMetadata {
@@ -1945,9 +1951,10 @@ impl GetFullBatchData for MeshPipeline {
         };
 
         if indexed {
-            indirect_parameters_buffer.set_indexed(indirect_parameters_offset, indirect_parameters);
+            phase_indirect_parameters_buffers
+                .set_indexed(indirect_parameters_offset, indirect_parameters);
         } else {
-            indirect_parameters_buffer
+            phase_indirect_parameters_buffers
                 .set_non_indexed(indirect_parameters_offset, indirect_parameters);
         }
     }
@@ -2555,7 +2562,7 @@ pub struct MeshBindGroupPair {
     no_motion_vectors: BindGroup,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Deref, DerefMut)]
 pub struct MeshBindGroups(pub TypeIdMap<MeshPhaseBindGroups>);
 
 impl MeshPhaseBindGroups {
@@ -2603,7 +2610,7 @@ impl MeshBindGroupPair {
 
 pub fn prepare_mesh_bind_group(
     meshes: Res<RenderAssets<RenderMesh>>,
-    mut groups: ResMut<MeshBindGroups>,
+    mut mesh_bind_groups: ResMut<MeshBindGroups>,
     mesh_pipeline: Res<MeshPipeline>,
     render_device: Res<RenderDevice>,
     cpu_batched_instance_buffer: Option<
@@ -2635,13 +2642,13 @@ pub fn prepare_mesh_bind_group(
     }
 
     if let Some(gpu_batched_instance_buffers) = gpu_batched_instance_buffers {
-        for (phase_id, batched_phase_item_instance_buffers) in
+        for (phase_type_id, batched_phase_item_instance_buffers) in
             &gpu_batched_instance_buffers.phase_item_instance_buffers
         {
             if let Some(instance_data_binding) =
                 batched_phase_item_instance_buffers.instance_data_binding()
             {
-                prepare_mesh_bind_group_for_phase(
+                let mesh_phase_bind_groups = prepare_mesh_bind_group_for_phase(
                     instance_data_binding,
                     &meshes,
                     &mesh_pipeline,
@@ -2649,7 +2656,9 @@ pub fn prepare_mesh_bind_group(
                     &skins_uniform,
                     &weights_uniform,
                     &mut render_lightmaps,
-                )
+                );
+
+                mesh_bind_groups.insert(*phase_type_id, mesh_phase_bind_groups);
             }
         }
     }
@@ -2667,8 +2676,10 @@ fn prepare_mesh_bind_group_for_phase(
     let layouts = &mesh_pipeline.mesh_layouts;
 
     // TODO: Reuse allocations.
-    let mut groups = MeshPhaseBindGroups::default();
-    groups.model_only = Some(layouts.model_only(&render_device, &model));
+    let mut groups = MeshPhaseBindGroups {
+        model_only: Some(layouts.model_only(render_device, &model)),
+        ..default()
+    };
 
     // Create the skinned mesh bind group with the current and previous buffers
     // (the latter being for motion vector computation). If there's no previous
@@ -2677,8 +2688,8 @@ fn prepare_mesh_bind_group_for_phase(
     if let Some(skin) = skin {
         let prev_skin = skins_uniform.prev_buffer.buffer().unwrap_or(skin);
         groups.skinned = Some(MeshBindGroupPair {
-            motion_vectors: layouts.skinned_motion(&render_device, &model, skin, prev_skin),
-            no_motion_vectors: layouts.skinned(&render_device, &model, skin),
+            motion_vectors: layouts.skinned_motion(render_device, &model, skin, prev_skin),
+            no_motion_vectors: layouts.skinned(render_device, &model, skin),
         });
     }
 
@@ -2693,7 +2704,7 @@ fn prepare_mesh_bind_group_for_phase(
                         let prev_skin = skins_uniform.prev_buffer.buffer().unwrap_or(skin);
                         MeshBindGroupPair {
                             motion_vectors: layouts.morphed_skinned_motion(
-                                &render_device,
+                                render_device,
                                 &model,
                                 skin,
                                 weights,
@@ -2702,7 +2713,7 @@ fn prepare_mesh_bind_group_for_phase(
                                 prev_weights,
                             ),
                             no_motion_vectors: layouts.morphed_skinned(
-                                &render_device,
+                                render_device,
                                 &model,
                                 skin,
                                 weights,
@@ -2712,18 +2723,13 @@ fn prepare_mesh_bind_group_for_phase(
                     }
                     None => MeshBindGroupPair {
                         motion_vectors: layouts.morphed_motion(
-                            &render_device,
+                            render_device,
                             &model,
                             weights,
                             targets,
                             prev_weights,
                         ),
-                        no_motion_vectors: layouts.morphed(
-                            &render_device,
-                            &model,
-                            weights,
-                            targets,
-                        ),
+                        no_motion_vectors: layouts.morphed(render_device, &model, weights, targets),
                     },
                 };
                 groups.morph_targets.insert(id, bind_group_pair);
@@ -2736,9 +2742,11 @@ fn prepare_mesh_bind_group_for_phase(
     for (lightmap_slab_id, lightmap_slab) in render_lightmaps.slabs.iter_mut().enumerate() {
         groups.lightmaps.insert(
             LightmapSlabIndex(NonMaxU32::new(lightmap_slab_id as u32).unwrap()),
-            layouts.lightmapped(&render_device, &model, lightmap_slab, bindless_supported),
+            layouts.lightmapped(render_device, &model, lightmap_slab, bindless_supported),
         );
     }
+
+    groups
 }
 
 pub struct SetMeshViewBindGroup<const I: usize>;
@@ -2842,13 +2850,18 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetMeshBindGroup<I> {
             .get(entity)
             .map(|render_lightmap| render_lightmap.slab_index);
 
-        let Some(bind_group) = bind_groups.get(
-            mesh_asset_id,
-            lightmap_slab_index,
-            is_skinned,
-            is_morphed,
-            has_motion_vector_prepass,
-        ) else {
+        let Some(bind_group) = bind_groups
+            .get(&TypeId::of::<P>())
+            .and_then(|phase_bind_group| {
+                phase_bind_group.get(
+                    mesh_asset_id,
+                    lightmap_slab_index,
+                    is_skinned,
+                    is_morphed,
+                    has_motion_vector_prepass,
+                )
+            })
+        else {
             return RenderCommandResult::Failure(
                 "The MeshBindGroups resource wasn't set in the render phase. \
                 It should be set by the prepare_mesh_bind_group system.\n\
@@ -2994,9 +3007,18 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
                         // Look up the indirect parameters buffer, as well as
                         // the buffer we're going to use for
                         // `multi_draw_indexed_indirect_count` (if available).
+                        let Some(phase_indirect_parameters_buffers) =
+                            indirect_parameters_buffer.buffers.get(&TypeId::of::<P>())
+                        else {
+                            warn!(
+                                "Not rendering mesh because indexed indirect parameters buffer \
+                                 wasn't present for this phase",
+                            );
+                            return RenderCommandResult::Skip;
+                        };
                         let (Some(indirect_parameters_buffer), Some(batch_sets_buffer)) = (
-                            indirect_parameters_buffer.indexed_data_buffer(),
-                            indirect_parameters_buffer.indexed_batch_sets_buffer(),
+                            phase_indirect_parameters_buffers.indexed_data_buffer(),
+                            phase_indirect_parameters_buffers.indexed_batch_sets_buffer(),
                         ) else {
                             warn!(
                                 "Not rendering mesh because indexed indirect parameters buffer \
@@ -3051,9 +3073,18 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
                     // Look up the indirect parameters buffer, as well as the
                     // buffer we're going to use for
                     // `multi_draw_indirect_count` (if available).
+                    let Some(phase_indirect_parameters_buffers) =
+                        indirect_parameters_buffer.buffers.get(&TypeId::of::<P>())
+                    else {
+                        warn!(
+                            "Not rendering mesh because indexed indirect parameters buffer \
+                                 wasn't present for this phase",
+                        );
+                        return RenderCommandResult::Skip;
+                    };
                     let (Some(indirect_parameters_buffer), Some(batch_sets_buffer)) = (
-                        indirect_parameters_buffer.non_indexed_data_buffer(),
-                        indirect_parameters_buffer.non_indexed_batch_sets_buffer(),
+                        phase_indirect_parameters_buffers.non_indexed_data_buffer(),
+                        phase_indirect_parameters_buffers.non_indexed_batch_sets_buffer(),
                     ) else {
                         warn!(
                             "Not rendering mesh because non-indexed indirect parameters buffer \

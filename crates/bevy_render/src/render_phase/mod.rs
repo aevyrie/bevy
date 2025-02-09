@@ -43,9 +43,7 @@ use nonmax::NonMaxU32;
 pub use rangefinder::*;
 use wgpu::Features;
 
-use crate::batching::gpu_preprocessing::{
-    BatchedPhaseItemInstanceBuffers, BatchingPlugin, GpuPreprocessingMode, GpuPreprocessingSupport,
-};
+use crate::batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport};
 use crate::renderer::RenderDevice;
 use crate::sync_world::{MainEntity, MainEntityHashMap};
 use crate::view::RetainedViewEntity;

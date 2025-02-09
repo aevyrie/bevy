@@ -366,6 +366,9 @@ impl Plugin for RenderPlugin {
             MeshPlugin,
             GlobalsPlugin,
             MorphPlugin,
+            BatchingPlugin {
+                allow_copies_from_indirect_parameters: self.allow_copies_from_indirect_parameters,
+            },
             SyncWorldPlugin,
             StoragePlugin,
             GpuReadbackPlugin::default(),
