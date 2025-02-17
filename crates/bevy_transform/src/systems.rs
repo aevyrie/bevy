@@ -231,10 +231,19 @@ mod serial {
 #[cfg(feature = "std")]
 mod parallel {
     use crate::prelude::*;
-    use bevy_ecs::{entity::UniqueEntityIter, prelude::*, system::lifetimeless::Read};
+    use bevy_ecs::{
+        entity::UniqueEntityIter,
+        prelude::*,
+        query::{QueryData, QueryManyUniqueIter},
+    };
     use bevy_tasks::{ComputeTaskPool, TaskPool};
     use bevy_utils::Parallel;
-    use core::sync::atomic::{AtomicI32, Ordering};
+    use core::{
+        iter::Copied,
+        marker::PhantomData,
+        slice::Iter,
+        sync::atomic::{AtomicI32, Ordering},
+    };
     use std::{
         sync::{
             // TODO: this implementation could be used in no_std if there was a
@@ -251,7 +260,7 @@ mod parallel {
     /// Third party plugins should ensure that this is used in concert with
     /// [`sync_simple_transforms`](super::sync_simple_transforms) and
     /// [`compute_transform_leaves`](super::compute_transform_leaves).
-    pub fn propagate_parent_transforms(
+    pub fn propagate_parent_transforms<'a>(
         mut queue: Local<WorkQueue>,
         mut orphaned: RemovedComponents<ChildOf>,
         mut orphans: Local<Vec<Entity>>,
@@ -259,7 +268,12 @@ mod parallel {
             (Entity, Ref<Transform>, &mut GlobalTransform, &Children),
             Without<ChildOf>,
         >,
-        nodes: NodeQuery,
+        nodes: Query<(
+            Entity,
+            &Children,
+            &ChildOf,
+            (Ref<Transform>, Mut<GlobalTransform>),
+        )>,
     ) {
         // Orphans
         orphans.clear();
@@ -269,12 +283,12 @@ mod parallel {
         // Process roots in parallel, seeding the work queue
         roots.par_iter_mut().for_each_init(
             || queue.local_queue.borrow_local_mut(),
-            |outbox, (parent, transform, mut parent_transform, children)| {
-                if transform.is_changed()
-                    || parent_transform.is_added()
+            |outbox, (parent, parent_transform, mut parent_global_transform, children)| {
+                if parent_transform.is_changed()
+                    || parent_global_transform.is_added()
                     || orphans.binary_search(&parent).is_ok()
                 {
-                    *parent_transform = GlobalTransform::from(*transform);
+                    *parent_global_transform = GlobalTransform::from(*parent_transform);
                 }
 
                 // SAFETY: the parent entities passed into this function are taken from iterating
@@ -282,11 +296,24 @@ mod parallel {
                 // mutable aliasing, and making this call safe.
                 #[expect(unsafe_code, reason = "Mutating disjoint entities in parallel")]
                 unsafe {
-                    propagate_to_child_unchecked(
-                        (parent, parent_transform, children),
+                    let propagate_single = PropagateEntity::<
+                        (Ref<Transform>, Mut<GlobalTransform>),
+                        _,
+                    >::new_unchecked(
+                        parent,
+                        &children,
                         &nodes,
-                        outbox,
+                        |(.., (transform, global_transform))| {
+                            if parent_global_transform.is_changed()
+                                || transform.is_changed()
+                                || global_transform.is_added()
+                            {
+                                **global_transform =
+                                    parent_global_transform.mul_transform(**transform);
+                            }
+                        },
                     );
+                    outbox.extend(propagate_single.map(|(child, ..)| child));
                 }
             },
         );
@@ -301,20 +328,6 @@ mod parallel {
                 .for_each(|_| s.spawn(async { propagation_worker(&queue, &nodes) }));
         });
     }
-
-    /// Alias for a large, repeatedly used query. Queries for transform entities that have both a
-    /// parent and children, thus they are neither roots nor leaves.
-    type NodeQuery<'w, 's> = Query<
-        'w,
-        's,
-        (
-            Entity,
-            Ref<'static, Transform>,
-            Mut<'static, GlobalTransform>,
-            Read<Children>,
-            Read<ChildOf>,
-        ),
-    >;
 
     /// A queue shared between threads for transform propagation.
     pub struct WorkQueue {
@@ -368,7 +381,15 @@ mod parallel {
     /// A parallel worker that will consume processed parent entities from the queue, and push
     /// children to the queue once it has propagated their [`GlobalTransform`].
     #[inline]
-    fn propagation_worker(queue: &WorkQueue, nodes: &NodeQuery) {
+    fn propagation_worker(
+        queue: &WorkQueue,
+        nodes: &Query<(
+            Entity,
+            &Children,
+            &ChildOf,
+            (Ref<Transform>, Mut<GlobalTransform>),
+        )>,
+    ) {
         #[cfg(feature = "std")]
         let _span = bevy_log::info_span!("transform propagation worker").entered();
 
@@ -405,8 +426,8 @@ mod parallel {
                 // contains unique entities, making this safe to call.
                 #[expect(unsafe_code, reason = "Mutating disjoint entities in parallel")]
                 unsafe {
-                    let (_, _, mut parent_global_transform, mut children, _) =
-                        nodes.get_unchecked(parent).unwrap();
+                    // let (_, _, mut parent_global_transform, mut children, _) =
+                    //     nodes.get_unchecked(parent).unwrap();
 
                     // Optimization: when there is a single child, we want to recurse the hierarchy
                     // sequentially until we find an entity with multiple children, at which point
@@ -414,36 +435,29 @@ mod parallel {
                     // chains of single entities can become very slow, as they require starting a
                     // new task for each level of the hierarchy. When there are many levels, this
                     // overhead hurts.
-                    while children.len() == 1 {
-                        let child = *children.first().expect("Length should equal 1");
-                        let Ok((
-                            _,
-                            child_transform,
-                            mut child_global_transform,
-                            grandchildren,
-                            actual_parent,
-                        )) = nodes.get_unchecked(child)
-                        else {
-                            continue 'task_loop;
-                        };
-                        assert!(actual_parent.get() == parent); // Safety: check for cycles
-                        if parent_global_transform.is_changed()
-                            || child_transform.is_changed()
-                            || child_global_transform.is_added()
-                        {
-                            *child_global_transform =
-                                parent_global_transform.mul_transform(*child_transform);
-                        }
-                        parent = child;
-                        children = grandchildren;
-                        parent_global_transform = child_global_transform;
-                    }
+                    // while children.len() == 1 {
+                    //     let mut propagation_iter = PropagateEntity::new_unchecked(
+                    //         parent,
+                    //         parent_global_transform,
+                    //         children,
+                    //         nodes,
+                    //     );
+                    //     let Some((child, child_global_transform, grandchildren)) =
+                    //         propagation_iter.next()
+                    //     else {
+                    //         continue 'task_loop;
+                    //     };
+                    //     (parent, children, parent_global_transform) =
+                    //         (child, grandchildren, child_global_transform);
+                    // }
 
-                    propagate_to_child_unchecked(
-                        (parent, parent_global_transform, children),
-                        nodes,
-                        &mut outbox,
-                    );
+                    // let propagate_iter = PropagateEntity::new_unchecked(
+                    //     parent,
+                    //     parent_global_transform,
+                    //     children,
+                    //     nodes,
+                    // );
+                    // outbox.extend(propagate_iter.map(|(child, ..)| child));
                 }
                 // Send chunks from inside the loop as well as at the end. This allows other workers
                 // to pick up work while this task is still running. Only do this within the loop
@@ -457,64 +471,108 @@ mod parallel {
         }
     }
 
-    /// Propagate transforms from `parent` to its non-leaf `children`, pushing updated child
-    /// entities to the `outbox`. Propagation does not visit leaf nodes; instead, they are computed
-    /// in [`compute_transform_leaves`](super::compute_transform_leaves), which can optimize much
-    /// more efficiently.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure that concurrent calls to this function are given unique `parent`
-    /// entities. Calling this function concurrently with the same `parent` is unsound. This
-    /// function will validate that the entity hierarchy does not contain cycles to prevent mutable
-    /// aliasing during propagation, but it is unable to verify that it isn't being used to mutably
-    /// alias the same entity.
-    ///
-    /// ## Panics
-    ///
-    /// Panics if the parent of a child node is not the same as the supplied `parent`. This
-    /// assertion ensures that the hierarchy is acyclic, which in turn ensures that if the caller is
-    /// following the supplied safety rules, multi-threaded propagation is sound.
-    #[inline]
-    #[expect(unsafe_code, reason = "Mutating disjoint entities in parallel")]
-    unsafe fn propagate_to_child_unchecked(
-        (parent, parent_transform, children): (Entity, Mut<GlobalTransform>, &Children),
-        nodes: &NodeQuery,
-        outbox: &mut Vec<Entity>,
-    ) {
-        // Safety: `Children` is guaranteed to hold unique entities.
-        #[expect(unsafe_code, reason = "Mutating disjoint entities in parallel")]
-        let children_iter = unsafe { UniqueEntityIter::from_iterator_unchecked(children.iter()) };
-        // Performance note: iter_many tests every child to see if it meets the query. For leaf
-        // nodes, this unfortunately means we have the pay the price of checking every child, even
-        // if it is a leaf node and is skipped.
-        //
-        // To ensure this is still the fastest design, I tried removing the second pass
-        // (`compute_transform_leaves`) and instead simply doing that here. However, that proved to
-        // be much slower than two pass for a few reasons:
-        // - it's less cache friendly and is outright slower than the tight loop in the second pass
-        // - it prevents parallelism, as all children must be iterated in series
-        //
-        // The only way I can see to make this faster when there are many leaf nodes is to speed up
-        // archetype checking to make the iterator skip leaf entities more quickly, or encoding the
-        // hierarchy level as a component. That, or use some kind of change detection to mark dirty
-        // subtrees when the transform is mutated.
-        for (child, transform, mut global_transform, _, child_of) in
-            // Safety: traversing the entity tree from the roots, we assert that the childof and
-            // children pointers match in both directions (see assert below) to ensure the hierarchy
-            // does not have any cycles. Because the hierarchy does not have cycles, we know we are
-            // visiting disjoint entities in parallel, which is safe.
-            unsafe { nodes.iter_many_unique_unsafe(children_iter) }
-        {
-            assert!(child_of.get() == parent);
-            if parent_transform.is_changed()
-                || transform.is_changed()
-                || global_transform.is_added()
-            {
-                *global_transform = parent_transform.mul_transform(*transform);
-            }
-            outbox.push(child);
+    struct PropagateEntity<'w: 'a, 's: 'a, 'a, Q, F>
+    where
+        Q: QueryData,
+        F: Fn((Entity, &Children, &ChildOf, &mut <Q as QueryData>::Item<'_>)),
+        <Q as QueryData>::Item<'w>: 'w,
+    {
+        parent: Entity,
+        iterator: QueryManyUniqueIter<
+            'w,
+            'w,
+            (Entity, &'w Children, &'w ChildOf, Q),
+            (),
+            UniqueEntityIter<Copied<Iter<'w, Entity>>>,
+        >,
+        func: F,
+        // nodes: &'a Query<'w, 's, (Entity, Read<Children>, Read<ChildOf>, Q)>,
+        spooky: PhantomData<(Q, &'a (), &'s (), &'w ())>,
+    }
+
+    impl<'w: 's, 's, 'a, Q, F> Iterator for PropagateEntity<'w, 's, 'a, Q, F>
+    where
+        Q: QueryData,
+        F: Fn((Entity, &Children, &ChildOf, &mut <Q as QueryData>::Item<'_>)),
+    {
+        type Item = <(Entity, &'w Children, &'w ChildOf, Q) as QueryData>::Item<'w>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let actual_parent = self.parent;
+            let mut data = self.iterator.next();
+            data.as_mut().map(|(entity, children, parent, q)| {
+                assert!(parent.get() == actual_parent);
+                (self.func)((*entity, children, parent, q));
+            });
+            data
         }
+    }
+
+    impl<'w: 'a, 's: 'a, 'a, Q, F> PropagateEntity<'w, 's, 'a, Q, F>
+    where
+        Q: QueryData,
+        I: Iterator<Item = <(Entity, &'w Children, &'w ChildOf, Q) as QueryData>::Item<'w>> + 'w,
+        F: Fn((Entity, &Children, &ChildOf, &mut <Q as QueryData>::Item<'_>)),
+    {
+        /// Propagate transforms from `parent` to its non-leaf `children`, producing an iterator of
+        /// visited child entities. Propagation does not visit leaf nodes; instead, they are
+        /// computed in [`compute_transform_leaves`](super::compute_transform_leaves), which can
+        /// optimize much more efficiently.
+        ///
+        /// # Safety
+        ///
+        /// Callers must ensure that concurrent calls to this function are given unique `parent`
+        /// entities. Calling this function concurrently with the same `parent` is unsound. This
+        /// function will validate that the entity hierarchy does not contain cycles to prevent
+        /// mutable aliasing during propagation, but it is unable to verify that it isn't being used
+        /// to mutably alias the same `parent` entity.
+        ///
+        /// ## Panics
+        ///
+        /// Panics if the parent of a child node is not the same as the supplied `parent`. This
+        /// assertion ensures that the hierarchy is acyclic, which in turn ensures that if the
+        /// caller is following the supplied safety rules, multi-threaded propagation is sound.
+        #[expect(unsafe_code, reason = "Mutating disjoint entities in parallel")]
+        unsafe fn new_unchecked<'c: 'q, 'q>(
+            parent: Entity,
+            children: &'w Children,
+            nodes: &'w Query<'w, 'w, (Entity, &'w Children, &'w ChildOf, Q)>,
+            func: F,
+        ) -> Self
+        where
+            'w: 'q,
+        {
+            #[expect(unsafe_code, reason = "Mutating disjoint entities in parallel")]
+            let iterator = unsafe {
+                let children_iter = UniqueEntityIter::from_iterator_unchecked(children.iter());
+                nodes.iter_many_unique_unsafe(children_iter)
+            };
+            PropagateEntity {
+                // nodes,
+                parent,
+                func,
+                iterator,
+                spooky: PhantomData,
+            }
+        }
+
+        // fn next(
+        //     &mut self,
+        // ) -> Option<(
+        //     Entity,
+        //     &'a Children,
+        //     &'a ChildOf,
+        //     <Q as QueryData>::Item<'a>,
+        // )> {
+        //     let actual_parent = self.parent;
+        //     let mut data = self.iterator.next();
+        //     data.as_mut().map(|(entity, children, parent, q)| {
+        //         assert!(parent.get() == actual_parent);
+        //         (self.func)((*entity, children, parent, q));
+        //         (*entity, *children, *parent, q)
+        //     });
+        //     data
+        // }
     }
 }
 
