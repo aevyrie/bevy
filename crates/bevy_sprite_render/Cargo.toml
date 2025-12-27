@@ -31,15 +31,17 @@ bevy_reflect = { path = "../bevy_reflect", version = "0.18.0-dev" }
 bevy_render = { path = "../bevy_render", version = "0.18.0-dev" }
 bevy_transform = { path = "../bevy_transform", version = "0.18.0-dev" }
 bevy_utils = { path = "../bevy_utils", version = "0.18.0-dev" }
+bevy_tasks = { path = "../bevy_tasks", version = "0.18.0-dev" }
 bevy_derive = { path = "../bevy_derive", version = "0.18.0-dev" }
 bevy_platform = { path = "../bevy_platform", version = "0.18.0-dev", default-features = false, features = [
-  "std",
+    "std",
 ] }
 
 # other
 bytemuck = { version = "1", features = ["derive", "must_cast"] }
 fixedbitset = "0.5"
 derive_more = { version = "2", default-features = false, features = ["from"] }
+smallvec = { version = "1", default-features = false, features = ["const_new"] }
 bitflags = "2.3"
 nonmax = "0.5"
 tracing = { version = "0.1", default-features = false, features = ["std"] }

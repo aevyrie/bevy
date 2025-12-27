@@ -40,10 +40,12 @@ use bevy_render::{
 };
 use bevy_shader::{Shader, ShaderDefVal};
 use bevy_sprite::{Anchor, Sprite, SpriteScalingMode};
+use bevy_tasks::{ComputeTaskPool, ParallelSlice};
 use bevy_transform::components::GlobalTransform;
 use bevy_utils::default;
 use bytemuck::{Pod, Zeroable};
 use fixedbitset::FixedBitSet;
+use smallvec::SmallVec;
 
 #[derive(Resource)]
 pub struct SpritePipeline {
@@ -590,6 +592,12 @@ pub fn prepare_sprite_view_bind_groups(
     }
 }
 
+/// A local cache for sprite instances.
+// Note: we need this because `SpriteInstance` is private and
+// `prepare_sprite_image_bind_groups` is pub.
+#[derive(Default)]
+pub struct SpriteInstances(Vec<SmallVec<[SpriteInstance; 1]>>);
+
 pub fn prepare_sprite_image_bind_groups(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -603,6 +611,7 @@ pub fn prepare_sprite_image_bind_groups(
     mut phases: ResMut<ViewSortedRenderPhases<Transparent2d>>,
     events: Res<SpriteAssetEvents>,
     mut batches: ResMut<SpriteBatches>,
+    mut sprite_instances: Local<SpriteInstances>,
 ) {
     // If an image has changed, the GpuImage has (probably) changed
     for event in &events.images {
@@ -626,10 +635,127 @@ pub fn prepare_sprite_image_bind_groups(
 
     let image_bind_groups = &mut *image_bind_groups;
 
+    sprite_instances.0 = extracted_sprites
+        .sprites
+        .par_splat_map(
+            ComputeTaskPool::get(),
+            None,
+            |_chunk_index, chunk: &[ExtractedSprite]| {
+                let mut chunk_instances = Vec::with_capacity(chunk.len());
+                for extracted_sprite in chunk {
+                    let mut instances = SmallVec::new();
+                    let Some(gpu_image) = gpu_images.get(extracted_sprite.image_handle_id) else {
+                        chunk_instances.push(instances);
+                        continue;
+                    };
+
+                    let batch_image_size = gpu_image.size_2d().as_vec2();
+                    match extracted_sprite.kind {
+                        ExtractedSpriteKind::Single {
+                            anchor,
+                            rect,
+                            scaling_mode,
+                            custom_size,
+                        } => {
+                            let mut quad_size = batch_image_size;
+                            let mut texture_size = batch_image_size;
+                            let mut uv_offset_scale = if let Some(rect) = rect {
+                                let rect_size = rect.size();
+                                quad_size = rect_size;
+                                texture_size = rect_size;
+                                Vec4::new(
+                                    rect.min.x / batch_image_size.x,
+                                    rect.max.y / batch_image_size.y,
+                                    rect_size.x / batch_image_size.x,
+                                    -rect_size.y / batch_image_size.y,
+                                )
+                            } else {
+                                Vec4::new(0.0, 1.0, 1.0, -1.0)
+                            };
+
+                            if extracted_sprite.flip_x {
+                                uv_offset_scale.x += uv_offset_scale.z;
+                                uv_offset_scale.z *= -1.0;
+                            }
+                            if extracted_sprite.flip_y {
+                                uv_offset_scale.y += uv_offset_scale.w;
+                                uv_offset_scale.w *= -1.0;
+                            }
+
+                            quad_size = custom_size.unwrap_or(quad_size);
+                            let mut quad_translation = Vec2::ZERO;
+                            if let Some(scaling_mode) = scaling_mode {
+                                apply_scaling(
+                                    scaling_mode,
+                                    texture_size,
+                                    &mut quad_size,
+                                    &mut quad_translation,
+                                    &mut uv_offset_scale,
+                                );
+                            }
+
+                            let transform = extracted_sprite.transform.affine()
+                                * Affine3A::from_scale_rotation_translation(
+                                    quad_size.extend(1.0),
+                                    Quat::IDENTITY,
+                                    ((quad_size + quad_translation) * (-anchor - Vec2::splat(0.5)))
+                                        .extend(0.0),
+                                );
+
+                            instances.push(SpriteInstance::from(
+                                &transform,
+                                &extracted_sprite.color,
+                                &uv_offset_scale,
+                            ));
+                        }
+                        ExtractedSpriteKind::Slices { ref indices } => {
+                            for i in indices.clone() {
+                                let slice = &extracted_slices.slices[i];
+                                let rect = slice.rect;
+                                let rect_size = rect.size();
+                                let mut uv_offset_scale = Vec4::new(
+                                    rect.min.x / batch_image_size.x,
+                                    rect.max.y / batch_image_size.y,
+                                    rect_size.x / batch_image_size.x,
+                                    -rect_size.y / batch_image_size.y,
+                                );
+
+                                if extracted_sprite.flip_x {
+                                    uv_offset_scale.x += uv_offset_scale.z;
+                                    uv_offset_scale.z *= -1.0;
+                                }
+                                if extracted_sprite.flip_y {
+                                    uv_offset_scale.y += uv_offset_scale.w;
+                                    uv_offset_scale.w *= -1.0;
+                                }
+
+                                let transform = extracted_sprite.transform.affine()
+                                    * Affine3A::from_scale_rotation_translation(
+                                        slice.size.extend(1.0),
+                                        Quat::IDENTITY,
+                                        (slice.size * -Vec2::splat(0.5) + slice.offset).extend(0.0),
+                                    );
+
+                                instances.push(SpriteInstance::from(
+                                    &transform,
+                                    &extracted_sprite.color,
+                                    &uv_offset_scale,
+                                ));
+                            }
+                        }
+                    }
+                    chunk_instances.push(instances);
+                }
+                chunk_instances
+            },
+        )
+        .into_iter()
+        .flatten()
+        .collect();
+
     for (retained_view, transparent_phase) in phases.iter_mut() {
         let mut current_batch = None;
         let mut batch_item_index = 0;
-        let mut batch_image_size = Vec2::ZERO;
         let mut batch_image_handle = AssetId::invalid();
 
         // Iterate through the phase items and detect when successive sprites that can be batched.
@@ -655,7 +781,6 @@ pub fn prepare_sprite_image_bind_groups(
                     continue;
                 };
 
-                batch_image_size = gpu_image.size_2d().as_vec2();
                 batch_image_handle = extracted_sprite.image_handle_id;
                 image_bind_groups
                     .values
@@ -679,131 +804,16 @@ pub fn prepare_sprite_image_bind_groups(
                     },
                 ));
             }
-            match extracted_sprite.kind {
-                ExtractedSpriteKind::Single {
-                    anchor,
-                    rect,
-                    scaling_mode,
-                    custom_size,
-                } => {
-                    // By default, the size of the quad is the size of the texture
-                    let mut quad_size = batch_image_size;
-                    let mut texture_size = batch_image_size;
-
-                    // Calculate vertex data for this item
-                    // If a rect is specified, adjust UVs and the size of the quad
-                    let mut uv_offset_scale = if let Some(rect) = rect {
-                        let rect_size = rect.size();
-                        quad_size = rect_size;
-                        // Update texture size to the rect size
-                        // It will help scale properly only portion of the image
-                        texture_size = rect_size;
-                        Vec4::new(
-                            rect.min.x / batch_image_size.x,
-                            rect.max.y / batch_image_size.y,
-                            rect_size.x / batch_image_size.x,
-                            -rect_size.y / batch_image_size.y,
-                        )
-                    } else {
-                        Vec4::new(0.0, 1.0, 1.0, -1.0)
-                    };
-
-                    if extracted_sprite.flip_x {
-                        uv_offset_scale.x += uv_offset_scale.z;
-                        uv_offset_scale.z *= -1.0;
-                    }
-                    if extracted_sprite.flip_y {
-                        uv_offset_scale.y += uv_offset_scale.w;
-                        uv_offset_scale.w *= -1.0;
-                    }
-
-                    // Override the size if a custom one is specified
-                    quad_size = custom_size.unwrap_or(quad_size);
-
-                    // Used for translation of the quad if `TextureScale::Fit...` is specified.
-                    let mut quad_translation = Vec2::ZERO;
-
-                    // Scales the texture based on the `texture_scale` field.
-                    if let Some(scaling_mode) = scaling_mode {
-                        apply_scaling(
-                            scaling_mode,
-                            texture_size,
-                            &mut quad_size,
-                            &mut quad_translation,
-                            &mut uv_offset_scale,
-                        );
-                    }
-
-                    let transform = extracted_sprite.transform.affine()
-                        * Affine3A::from_scale_rotation_translation(
-                            quad_size.extend(1.0),
-                            Quat::IDENTITY,
-                            ((quad_size + quad_translation) * (-anchor - Vec2::splat(0.5)))
-                                .extend(0.0),
-                        );
-
-                    // Store the vertex data and add the item to the render phase
-                    sprite_meta
-                        .sprite_instance_buffer
-                        .push(SpriteInstance::from(
-                            &transform,
-                            &extracted_sprite.color,
-                            &uv_offset_scale,
-                        ));
-
-                    current_batch.as_mut().unwrap().get_mut().range.end += 1;
-                    index += 1;
-                }
-                ExtractedSpriteKind::Slices { ref indices } => {
-                    for i in indices.clone() {
-                        let slice = &extracted_slices.slices[i];
-                        let rect = slice.rect;
-                        let rect_size = rect.size();
-
-                        // Calculate vertex data for this item
-                        let mut uv_offset_scale: Vec4;
-
-                        // If a rect is specified, adjust UVs and the size of the quad
-                        uv_offset_scale = Vec4::new(
-                            rect.min.x / batch_image_size.x,
-                            rect.max.y / batch_image_size.y,
-                            rect_size.x / batch_image_size.x,
-                            -rect_size.y / batch_image_size.y,
-                        );
-
-                        if extracted_sprite.flip_x {
-                            uv_offset_scale.x += uv_offset_scale.z;
-                            uv_offset_scale.z *= -1.0;
-                        }
-                        if extracted_sprite.flip_y {
-                            uv_offset_scale.y += uv_offset_scale.w;
-                            uv_offset_scale.w *= -1.0;
-                        }
-
-                        let transform = extracted_sprite.transform.affine()
-                            * Affine3A::from_scale_rotation_translation(
-                                slice.size.extend(1.0),
-                                Quat::IDENTITY,
-                                (slice.size * -Vec2::splat(0.5) + slice.offset).extend(0.0),
-                            );
-
-                        // Store the vertex data and add the item to the render phase
-                        sprite_meta
-                            .sprite_instance_buffer
-                            .push(SpriteInstance::from(
-                                &transform,
-                                &extracted_sprite.color,
-                                &uv_offset_scale,
-                            ));
-
-                        current_batch.as_mut().unwrap().get_mut().range.end += 1;
-                        index += 1;
-                    }
-                }
+            let instances = &sprite_instances.0[item.extracted_index];
+            for instance in instances {
+                sprite_meta.sprite_instance_buffer.push(*instance);
+                current_batch.as_mut().unwrap().get_mut().range.end += 1;
+                index += 1;
             }
+
             transparent_phase.items[batch_item_index]
                 .batch_range_mut()
-                .end += 1;
+                .end += instances.len() as u32;
         }
         sprite_meta
             .sprite_instance_buffer
