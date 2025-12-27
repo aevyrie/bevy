@@ -39,6 +39,7 @@ use crate::{
 
 use bevy_app::{AnimationSystems, App, Plugin, PostUpdate};
 use bevy_asset::{Asset, AssetApp, AssetEventSystems, Assets};
+use bevy_camera::prelude::ViewVisibility;
 use bevy_ecs::{prelude::*, world::EntityMutExcept};
 use bevy_math::FloatOrd;
 use bevy_platform::{collections::HashMap, hash::NoOpHash};
@@ -57,7 +58,7 @@ use uuid::Uuid;
 pub mod prelude {
     #[doc(hidden)]
     pub use crate::{
-        animatable::*, animation_curves::*, graph::*, transition::*, AnimationClip,
+        animatable::*, animation_curves::*, graph::*, transition::*, AnimationClip, AnimationLOD,
         AnimationPlayer, AnimationPlugin, VariableCurve,
     };
 }
@@ -680,6 +681,31 @@ pub struct AnimationPlayer {
     active_animations: HashMap<AnimationNodeIndex, ActiveAnimation>,
 }
 
+/// Specifies the update frequency of an animation that is on the same entity.
+///
+/// This is used for animation level of detail (LOD). A value of 1.0 means update
+/// every frame, and a value of 0.5 means update every other frame.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Reflect)]
+#[reflect(Component, PartialEq, Default)]
+pub struct AnimationLOD {
+    /// The frequency at which the animation should be updated.
+    ///
+    /// 1.0 is every frame, 0.5 is every other frame, etc.
+    pub update_frequency: f32,
+    /// Accumulated time since the last update.
+    #[reflect(ignore)]
+    pub accumulated_time: f32,
+}
+
+impl Default for AnimationLOD {
+    fn default() -> Self {
+        Self {
+            update_frequency: 1.0,
+            accumulated_time: 0.0,
+        }
+    }
+}
+
 // This is needed since `#[derive(Clone)]` does not generate optimized `clone_from`.
 impl Clone for AnimationPlayer {
     fn clone(&self) -> Self {
@@ -1021,6 +1047,8 @@ pub type AnimationEntityMut<'w, 's> = EntityMutExcept<
         AnimatedBy,
         AnimationPlayer,
         AnimationGraphHandle,
+        AnimationLOD,
+        ViewVisibility,
     ),
 >;
 
@@ -1028,17 +1056,47 @@ pub type AnimationEntityMut<'w, 's> = EntityMutExcept<
 /// according to the currently-playing animations.
 pub fn animate_targets(
     par_commands: ParallelCommands,
+    time: Res<Time>,
     clips: Res<Assets<AnimationClip>>,
     graphs: Res<Assets<AnimationGraph>>,
     threaded_animation_graphs: Res<ThreadedAnimationGraphs>,
     players: Query<(&AnimationPlayer, &AnimationGraphHandle)>,
-    mut targets: Query<(Entity, &AnimationTargetId, &AnimatedBy, AnimationEntityMut)>,
+    mut targets: Query<(
+        Entity,
+        &AnimationTargetId,
+        &AnimatedBy,
+        AnimationEntityMut,
+        Option<&mut AnimationLOD>,
+        Option<&ViewVisibility>,
+    )>,
     animation_evaluation_state: Local<ThreadLocal<RefCell<AnimationEvaluationState>>>,
 ) {
+    let delta_seconds = time.delta_secs();
+
     // Evaluate all animation targets in parallel.
-    targets
-        .par_iter_mut()
-        .for_each(|(entity, &target_id, &AnimatedBy(player_id), entity_mut)| {
+    targets.par_iter_mut().for_each(
+        |(
+            entity,
+            &target_id,
+            &AnimatedBy(player_id),
+            entity_mut,
+            animation_lod,
+            view_visibility,
+        )| {
+            if let Some(view_visibility) = view_visibility {
+                if !view_visibility.get() {
+                    return;
+                }
+            }
+
+            if let Some(mut animation_lod) = animation_lod {
+                animation_lod.accumulated_time += delta_seconds;
+                if animation_lod.accumulated_time * animation_lod.update_frequency < delta_seconds {
+                    return;
+                }
+                animation_lod.accumulated_time = 0.0;
+            }
+
             let (animation_player, animation_graph_id) =
                 if let Ok((player, graph_handle)) = players.get(player_id) {
                     (player, graph_handle.id())
@@ -1214,7 +1272,8 @@ pub fn animate_targets(
             if let Err(err) = evaluation_state.commit_all(entity_mut) {
                 warn!("Animation application failed: {:?}", err);
             }
-        });
+        },
+    );
 }
 
 /// Adds animation support to an app
@@ -1228,6 +1287,7 @@ impl Plugin for AnimationPlugin {
             .init_asset_loader::<AnimationGraphAssetLoader>()
             .register_asset_reflect::<AnimationClip>()
             .register_asset_reflect::<AnimationGraph>()
+            .register_type::<AnimationLOD>()
             .init_resource::<ThreadedAnimationGraphs>()
             .add_systems(
                 PostUpdate,
@@ -1662,6 +1722,92 @@ mod tests {
         map.insert_boxed(
             Box::new(AnimationNodeIndex::new(0)),
             Box::new(ActiveAnimation::default()),
+        );
+    }
+
+    #[test]
+    fn test_animation_lod() {
+        let mut world = World::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_millis(16));
+        world.insert_resource(time);
+
+        let mut clips = Assets::<AnimationClip>::default();
+        let clip_handle = clips.add(AnimationClip::default());
+        world.insert_resource(clips);
+
+        let mut graphs = Assets::<AnimationGraph>::default();
+        let mut graph = AnimationGraph::default();
+        let _node_index = graph.add_clip(clip_handle, 1.0, graph.root);
+        let graph_handle = graphs.add(graph);
+        world.insert_resource(graphs);
+
+        world.insert_resource(ThreadedAnimationGraphs::default());
+
+        let player_entity = world
+            .spawn((
+                AnimationPlayer::default(),
+                AnimationGraphHandle::from(graph_handle),
+            ))
+            .id();
+
+        let target_id = AnimationTargetId::from_name(&Name::new("test"));
+        let target_entity = world
+            .spawn((
+                target_id,
+                AnimatedBy(player_entity),
+                AnimationLOD {
+                    update_frequency: 0.5,
+                    accumulated_time: 0.0,
+                },
+            ))
+            .id();
+
+        let mut schedule = Schedule::new(PostUpdate);
+        schedule.add_systems(animate_targets);
+
+        // First frame - should be skipped by LOD
+        schedule.run(&mut world);
+        assert_eq!(
+            world
+                .get::<AnimationLOD>(target_entity)
+                .unwrap()
+                .accumulated_time,
+            0.016
+        );
+
+        // Second frame - should update
+        schedule.run(&mut world);
+        assert_eq!(
+            world
+                .get::<AnimationLOD>(target_entity)
+                .unwrap()
+                .accumulated_time,
+            0.0
+        );
+
+        // Third frame - should be skipped again
+        schedule.run(&mut world);
+        assert_eq!(
+            world
+                .get::<AnimationLOD>(target_entity)
+                .unwrap()
+                .accumulated_time,
+            0.016
+        );
+
+        // Fourth frame - test ViewVisibility::HIDDEN
+        world
+            .entity_mut(target_entity)
+            .insert(ViewVisibility::HIDDEN);
+        // It should return early BEFORE updating accumulated_time if invisible
+        schedule.run(&mut world);
+        assert_eq!(
+            world
+                .get::<AnimationLOD>(target_entity)
+                .unwrap()
+                .accumulated_time,
+            0.016 // Unchanged from previous frame because it returned early
         );
     }
 }

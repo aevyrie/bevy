@@ -5,6 +5,8 @@ use std::{f32::consts::PI, time::Duration};
 
 use argh::FromArgs;
 use bevy::{
+    animation::AnimationTargetId,
+    camera::visibility::VisibilityRange,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     light::CascadeShadowConfigBuilder,
     prelude::*,
@@ -96,6 +98,17 @@ impl RotationDirection {
     }
 }
 
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum FoxLOD {
+    Near,
+    Far,
+}
+
+#[derive(Resource)]
+struct LODSettings {
+    split_distance: f32,
+}
+
 #[derive(Component)]
 struct Ring {
     radius: f32,
@@ -169,12 +182,25 @@ fn setup(
             let (x, z) = (radius * c, radius * s);
 
             commands.entity(ring_parent).with_children(|builder| {
+                // Near LOD
                 builder
                     .spawn((
                         SceneRoot(fox_handle.clone()),
                         Transform::from_xyz(x, 0.0, z)
                             .with_scale(Vec3::splat(0.01))
                             .with_rotation(base_rotation * Quat::from_rotation_y(-fox_angle)),
+                        FoxLOD::Near,
+                    ))
+                    .observe(setup_scene_once_loaded);
+
+                // Far LOD
+                builder
+                    .spawn((
+                        SceneRoot(fox_handle.clone()),
+                        Transform::from_xyz(x, 0.0, z)
+                            .with_scale(Vec3::splat(0.01))
+                            .with_rotation(base_rotation * Quat::from_rotation_y(-fox_angle)),
+                        FoxLOD::Far,
                     ))
                     .observe(setup_scene_once_loaded);
             });
@@ -197,6 +223,12 @@ fn setup(
         Transform::from_translation(translation)
             .looking_at(0.2 * Vec3::new(translation.x, 0.0, translation.z), Vec3::Y),
     ));
+
+    // The split distance is roughly where the middle foxes are from the camera.
+    // Near side is ~1.26R, Far side is ~2.36R. Split at 1.8R.
+    commands.insert_resource(LODSettings {
+        split_distance: 1.4 * radius,
+    });
 
     // Plane
     commands.spawn((
@@ -231,19 +263,64 @@ fn setup_scene_once_loaded(
     scene_ready: On<SceneInstanceReady>,
     animations: Res<Animations>,
     foxes: Res<Foxes>,
+    lod_settings: Res<LODSettings>,
     mut commands: Commands,
     children: Query<&Children>,
     mut players: Query<&mut AnimationPlayer>,
+    root_query: Query<&FoxLOD>,
+    mesh_query: Query<Entity, With<Mesh3d>>,
+    bone_query: Query<Entity, With<AnimationTargetId>>,
 ) {
+    let Ok(fox_lod) = root_query.get(scene_ready.entity) else {
+        return;
+    };
+
+    let split = lod_settings.split_distance;
+    let margin = 0.1 * split;
+
+    let (freq, range) = match fox_lod {
+        FoxLOD::Near => (
+            1.0,
+            VisibilityRange {
+                start_margin: 0.0..0.0,
+                end_margin: (split - margin)..(split + margin),
+                ..default()
+            },
+        ),
+        FoxLOD::Far => (
+            0.1,
+            VisibilityRange {
+                start_margin: (split - margin)..(split + margin),
+                end_margin: 10000.0..10000.0,
+                ..default()
+            },
+        ),
+    };
+
     for child in children.iter_descendants(scene_ready.entity) {
         if let Ok(mut player) = players.get_mut(child) {
             let playing_animation = player.play(animations.node_indices[0]).repeat();
             if !foxes.sync {
                 playing_animation.seek_to(scene_ready.entity.index_u32() as f32 / 10.0);
             }
-            commands
-                .entity(child)
-                .insert(AnimationGraphHandle(animations.graph.clone()));
+            commands.entity(child).insert((
+                AnimationGraphHandle(animations.graph.clone()),
+                AnimationTransitions::default(),
+            ));
+        }
+
+        if bone_query.contains(child) {
+            commands.entity(child).insert((
+                AnimationLOD {
+                    update_frequency: freq,
+                    ..default()
+                },
+                range.clone(),
+            ));
+        }
+
+        if mesh_query.contains(child) {
+            commands.entity(child).insert(range.clone());
         }
     }
 }
