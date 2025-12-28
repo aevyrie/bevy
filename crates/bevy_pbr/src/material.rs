@@ -56,6 +56,7 @@ use bevy_render::{
 use bevy_render::{mesh::allocator::MeshAllocator, sync_world::MainEntityHashMap};
 use bevy_render::{texture::FallbackImage, view::RenderVisibleEntities};
 use bevy_shader::{Shader, ShaderDefVal};
+use bevy_tasks::{ComputeTaskPool, ParallelSlice};
 use bevy_utils::Parallel;
 use core::any::{Any, TypeId};
 use core::hash::{BuildHasher, Hasher};
@@ -1147,6 +1148,39 @@ pub fn specialize_material_meshes(
         .retain(|retained_view_entity, _| all_views.contains(retained_view_entity));
 }
 
+struct OpaqueAddCommand {
+    entities: (Entity, MainEntity),
+    batch_set_key: Opaque3dBatchSetKey,
+    bin_key: Opaque3dBinKey,
+    current_uniform_index: InputUniformIndex,
+    binned_type: BinnedRenderPhaseType,
+    current_change_tick: Tick,
+}
+
+struct AlphaMaskAddCommand {
+    entities: (Entity, MainEntity),
+    batch_set_key: OpaqueNoLightmap3dBatchSetKey,
+    bin_key: OpaqueNoLightmap3dBinKey,
+    current_uniform_index: InputUniformIndex,
+    binned_type: BinnedRenderPhaseType,
+    current_change_tick: Tick,
+}
+
+enum ValidationCommand {
+    Opaque(usize),
+    AlphaMask(usize),
+}
+
+#[derive(Default)]
+pub struct ParCache {
+    opaque_adds: Parallel<Vec<OpaqueAddCommand>>,
+    alpha_mask_adds: Parallel<Vec<AlphaMaskAddCommand>>,
+    transmissive_adds: Parallel<Vec<Transmissive3d>>,
+    transparent_adds: Parallel<Vec<Transparent3d>>,
+    validations: Parallel<Vec<ValidationCommand>>,
+    cache_updates: Parallel<Vec<(MainEntity, Tick)>>,
+}
+
 /// For each view, iterates over all the meshes visible from that view and adds
 /// them to [`BinnedRenderPhase`]s or [`SortedRenderPhase`]s as appropriate.
 pub fn queue_material_meshes(
@@ -1161,6 +1195,7 @@ pub fn queue_material_meshes(
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
     views: Query<(&ExtractedView, &RenderVisibleEntities)>,
     specialized_material_pipeline_cache: ResMut<SpecializedMaterialPipelineCache>,
+    mut par: Local<ParCache>,
 ) {
     for (view, visible_entities) in &views {
         let (
@@ -1184,145 +1219,226 @@ pub fn queue_material_meshes(
             continue;
         };
 
+        let visible_mesh_entities = visible_entities.get::<Mesh3d>();
+        if visible_mesh_entities.is_empty() {
+            continue;
+        }
+
         let rangefinder = view.rangefinder3d();
-        for (render_entity, visible_entity) in visible_entities.iter::<Mesh3d>() {
-            let Some((current_change_tick, pipeline_id)) = view_specialized_material_pipeline_cache
-                .get(visible_entity)
-                .map(|(current_change_tick, pipeline_id)| (*current_change_tick, *pipeline_id))
-            else {
-                continue;
-            };
 
-            // Skip the entity if it's cached in a bin and up to date.
-            if opaque_phase.validate_cached_entity(*visible_entity, current_change_tick)
-                || alpha_mask_phase.validate_cached_entity(*visible_entity, current_change_tick)
-            {
-                continue;
-            }
+        let (opaque_phase_ref, alpha_mask_phase_ref) = (&*opaque_phase, &*alpha_mask_phase);
 
-            let Some(material_instance) = render_material_instances.instances.get(visible_entity)
-            else {
-                continue;
-            };
-            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*visible_entity)
-            else {
-                continue;
-            };
-            let Some(material) = render_materials.get(material_instance.asset_id) else {
-                continue;
-            };
+        visible_mesh_entities.par_splat_map(ComputeTaskPool::get(), None, |_, entities| {
+            let _g = tracing::info_span!("par_visible_mesh_entities").entered();
 
-            // Fetch the slabs that this mesh resides in.
-            let (vertex_slab, index_slab) = mesh_allocator.mesh_slabs(&mesh_instance.mesh_asset_id);
+            let mut opaque_adds = par.opaque_adds.borrow_local_mut();
+            let mut alpha_mask_adds = par.alpha_mask_adds.borrow_local_mut();
+            let mut transmissive_adds = par.transmissive_adds.borrow_local_mut();
+            let mut transparent_adds = par.transparent_adds.borrow_local_mut();
+            let mut validations = par.validations.borrow_local_mut();
+            let mut cache_updates = par.cache_updates.borrow_local_mut();
 
-            match material.properties.render_phase_type {
-                RenderPhaseType::Transmissive => {
-                    let distance = rangefinder.distance(&mesh_instance.center)
-                        + material.properties.depth_bias;
-                    let Some(draw_function) = material
-                        .properties
-                        .get_draw_function(MainPassTransmissiveDrawFunction)
-                    else {
-                        continue;
-                    };
-                    transmissive_phase.add(Transmissive3d {
-                        entity: (*render_entity, *visible_entity),
-                        draw_function,
-                        pipeline: pipeline_id,
-                        distance,
-                        batch_range: 0..1,
-                        extra_index: PhaseItemExtraIndex::None,
-                        indexed: index_slab.is_some(),
-                    });
-                }
-                RenderPhaseType::Opaque => {
-                    if material.properties.render_method == OpaqueRendererMethod::Deferred {
-                        // Even though we aren't going to insert the entity into
-                        // a bin, we still want to update its cache entry. That
-                        // way, we know we don't need to re-examine it in future
-                        // frames.
-                        opaque_phase.update_cache(*visible_entity, None, current_change_tick);
+            for (render_entity, visible_entity) in entities {
+                let Some((current_change_tick, pipeline_id)) =
+                    view_specialized_material_pipeline_cache
+                        .get(visible_entity)
+                        .map(|(current_change_tick, pipeline_id)| {
+                            (*current_change_tick, *pipeline_id)
+                        })
+                else {
+                    continue;
+                };
+
+                // Skip the entity if it's cached in a bin and up to date.
+                if let Some((index, _, cached_entity)) = opaque_phase_ref
+                    .cached_entity_bin_keys
+                    .get_full(visible_entity)
+                {
+                    if cached_entity.change_tick == current_change_tick {
+                        validations.push(ValidationCommand::Opaque(index));
                         continue;
                     }
-                    let Some(draw_function) = material
-                        .properties
-                        .get_draw_function(MainPassOpaqueDrawFunction)
-                    else {
-                        continue;
-                    };
-                    let batch_set_key = Opaque3dBatchSetKey {
-                        pipeline: pipeline_id,
-                        draw_function,
-                        material_bind_group_index: Some(material.binding.group.0),
-                        vertex_slab: vertex_slab.unwrap_or_default(),
-                        index_slab,
-                        lightmap_slab: mesh_instance.shared.lightmap_slab_index.map(|index| *index),
-                    };
-                    let bin_key = Opaque3dBinKey {
-                        asset_id: mesh_instance.mesh_asset_id.into(),
-                    };
-                    opaque_phase.add(
-                        batch_set_key,
-                        bin_key,
-                        (*render_entity, *visible_entity),
-                        mesh_instance.current_uniform_index,
-                        BinnedRenderPhaseType::mesh(
-                            mesh_instance.should_batch(),
-                            &gpu_preprocessing_support,
-                        ),
-                        current_change_tick,
-                    );
                 }
-                // Alpha mask
-                RenderPhaseType::AlphaMask => {
-                    let Some(draw_function) = material
-                        .properties
-                        .get_draw_function(MainPassAlphaMaskDrawFunction)
-                    else {
+                if let Some((index, _, cached_entity)) = alpha_mask_phase_ref
+                    .cached_entity_bin_keys
+                    .get_full(visible_entity)
+                {
+                    if cached_entity.change_tick == current_change_tick {
+                        validations.push(ValidationCommand::AlphaMask(index));
                         continue;
-                    };
-                    let batch_set_key = OpaqueNoLightmap3dBatchSetKey {
-                        draw_function,
-                        pipeline: pipeline_id,
-                        material_bind_group_index: Some(material.binding.group.0),
-                        vertex_slab: vertex_slab.unwrap_or_default(),
-                        index_slab,
-                    };
-                    let bin_key = OpaqueNoLightmap3dBinKey {
-                        asset_id: mesh_instance.mesh_asset_id.into(),
-                    };
-                    alpha_mask_phase.add(
-                        batch_set_key,
-                        bin_key,
-                        (*render_entity, *visible_entity),
-                        mesh_instance.current_uniform_index,
-                        BinnedRenderPhaseType::mesh(
-                            mesh_instance.should_batch(),
-                            &gpu_preprocessing_support,
-                        ),
-                        current_change_tick,
-                    );
+                    }
                 }
-                RenderPhaseType::Transparent => {
-                    let distance = rangefinder.distance(&mesh_instance.center)
-                        + material.properties.depth_bias;
-                    let Some(draw_function) = material
-                        .properties
-                        .get_draw_function(MainPassTransparentDrawFunction)
-                    else {
-                        continue;
-                    };
-                    transparent_phase.add(Transparent3d {
-                        entity: (*render_entity, *visible_entity),
-                        draw_function,
-                        pipeline: pipeline_id,
-                        distance,
-                        batch_range: 0..1,
-                        extra_index: PhaseItemExtraIndex::None,
-                        indexed: index_slab.is_some(),
-                    });
+
+                let Some(material_instance) =
+                    render_material_instances.instances.get(visible_entity)
+                else {
+                    continue;
+                };
+                let Some(mesh_instance) =
+                    render_mesh_instances.render_mesh_queue_data(*visible_entity)
+                else {
+                    continue;
+                };
+                let Some(material) = render_materials.get(material_instance.asset_id) else {
+                    continue;
+                };
+
+                // Fetch the slabs that this mesh resides in.
+                let (vertex_slab, index_slab) =
+                    mesh_allocator.mesh_slabs(&mesh_instance.mesh_asset_id);
+
+                match material.properties.render_phase_type {
+                    RenderPhaseType::Transmissive => {
+                        let distance = rangefinder.distance(&mesh_instance.center)
+                            + material.properties.depth_bias;
+                        let Some(draw_function) = material
+                            .properties
+                            .get_draw_function(MainPassTransmissiveDrawFunction)
+                        else {
+                            continue;
+                        };
+                        transmissive_adds.push(Transmissive3d {
+                            entity: (*render_entity, *visible_entity),
+                            draw_function,
+                            pipeline: pipeline_id,
+                            distance,
+                            batch_range: 0..1,
+                            extra_index: PhaseItemExtraIndex::None,
+                            indexed: index_slab.is_some(),
+                        });
+                    }
+                    RenderPhaseType::Opaque => {
+                        if material.properties.render_method == OpaqueRendererMethod::Deferred {
+                            cache_updates.push((*visible_entity, current_change_tick));
+                            continue;
+                        }
+                        let Some(draw_function) = material
+                            .properties
+                            .get_draw_function(MainPassOpaqueDrawFunction)
+                        else {
+                            continue;
+                        };
+
+                        opaque_adds.push(OpaqueAddCommand {
+                            entities: (*render_entity, *visible_entity),
+                            batch_set_key: Opaque3dBatchSetKey {
+                                pipeline: pipeline_id,
+                                draw_function,
+                                material_bind_group_index: Some(material.binding.group.0),
+                                vertex_slab: vertex_slab.unwrap_or_default(),
+                                index_slab,
+                                lightmap_slab: mesh_instance
+                                    .shared
+                                    .lightmap_slab_index
+                                    .map(|index| *index),
+                            },
+                            bin_key: Opaque3dBinKey {
+                                asset_id: mesh_instance.mesh_asset_id.into(),
+                            },
+                            current_uniform_index: mesh_instance.current_uniform_index,
+                            binned_type: BinnedRenderPhaseType::mesh(
+                                mesh_instance.should_batch(),
+                                &gpu_preprocessing_support,
+                            ),
+                            current_change_tick,
+                        });
+                    }
+                    RenderPhaseType::AlphaMask => {
+                        let Some(draw_function) = material
+                            .properties
+                            .get_draw_function(MainPassAlphaMaskDrawFunction)
+                        else {
+                            continue;
+                        };
+
+                        alpha_mask_adds.push(AlphaMaskAddCommand {
+                            entities: (*render_entity, *visible_entity),
+                            batch_set_key: OpaqueNoLightmap3dBatchSetKey {
+                                draw_function,
+                                pipeline: pipeline_id,
+                                material_bind_group_index: Some(material.binding.group.0),
+                                vertex_slab: vertex_slab.unwrap_or_default(),
+                                index_slab,
+                            },
+                            bin_key: OpaqueNoLightmap3dBinKey {
+                                asset_id: mesh_instance.mesh_asset_id.into(),
+                            },
+                            current_uniform_index: mesh_instance.current_uniform_index,
+                            binned_type: BinnedRenderPhaseType::mesh(
+                                mesh_instance.should_batch(),
+                                &gpu_preprocessing_support,
+                            ),
+                            current_change_tick,
+                        });
+                    }
+                    RenderPhaseType::Transparent => {
+                        let distance = rangefinder.distance(&mesh_instance.center)
+                            + material.properties.depth_bias;
+                        let Some(draw_function) = material
+                            .properties
+                            .get_draw_function(MainPassTransparentDrawFunction)
+                        else {
+                            continue;
+                        };
+                        transparent_adds.push(Transparent3d {
+                            entity: (*render_entity, *visible_entity),
+                            draw_function,
+                            pipeline: pipeline_id,
+                            distance,
+                            batch_range: 0..1,
+                            extra_index: PhaseItemExtraIndex::None,
+                            indexed: index_slab.is_some(),
+                        });
+                    }
                 }
             }
+        });
+
+        for validation in par.validations.iter_mut().flat_map(|v| v.drain(..)) {
+            match validation {
+                ValidationCommand::Opaque(index) => {
+                    opaque_phase.valid_cached_entity_bin_keys.insert(index);
+                }
+                ValidationCommand::AlphaMask(index) => {
+                    alpha_mask_phase.valid_cached_entity_bin_keys.insert(index);
+                }
+            }
+        }
+
+        for (visible_entity, current_change_tick) in
+            par.cache_updates.iter_mut().flat_map(|v| v.drain(..))
+        {
+            opaque_phase.update_cache(visible_entity, None, current_change_tick);
+        }
+
+        for add in par.opaque_adds.iter_mut().flat_map(|v| v.drain(..)) {
+            opaque_phase.add(
+                add.batch_set_key,
+                add.bin_key,
+                add.entities,
+                add.current_uniform_index,
+                add.binned_type,
+                add.current_change_tick,
+            );
+        }
+
+        for add in par.alpha_mask_adds.iter_mut().flat_map(|v| v.drain(..)) {
+            alpha_mask_phase.add(
+                add.batch_set_key,
+                add.bin_key,
+                add.entities,
+                add.current_uniform_index,
+                add.binned_type,
+                add.current_change_tick,
+            );
+        }
+
+        for transmissive in par.transmissive_adds.iter_mut() {
+            transmissive_phase.extend(transmissive.drain(..));
+        }
+
+        for transparent in par.transparent_adds.iter_mut() {
+            transparent_phase.extend(transparent.drain(..));
         }
     }
 }

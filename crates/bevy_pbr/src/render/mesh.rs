@@ -65,7 +65,7 @@ use bevy_utils::{default, Parallel, TypeIdMap};
 use core::any::TypeId;
 use core::mem::size_of;
 use material_bind_groups::MaterialBindingId;
-use tracing::{error, warn};
+use tracing::{error, info_span, warn};
 
 use self::irradiance_volume::IRRADIANCE_VOLUMES_ARE_USABLE;
 use crate::{
@@ -1771,6 +1771,7 @@ pub fn collect_meshes_for_gpu_building(
     // Build the [`RenderMeshInstance`]s and [`MeshInputUniform`]s.
 
     for queue in render_mesh_instance_queues.iter_mut() {
+        let _g = info_span!("queue").entered();
         match *queue {
             RenderMeshInstanceGpuQueue::None => {
                 // This can only happen if the queue is empty.
@@ -1780,6 +1781,7 @@ pub fn collect_meshes_for_gpu_building(
                 ref mut changed,
                 ref mut removed,
             } => {
+                let _g = info_span!("cpucull").entered();
                 for (entity, mesh_instance_builder) in changed.drain(..) {
                     mesh_instance_builder.update(
                         entity,
@@ -1796,6 +1798,7 @@ pub fn collect_meshes_for_gpu_building(
                     );
                 }
 
+                let _g = info_span!("remove").entered();
                 for entity in removed.drain(..) {
                     remove_mesh_input_uniform(
                         entity,
@@ -1809,6 +1812,7 @@ pub fn collect_meshes_for_gpu_building(
                 ref mut changed,
                 ref mut removed,
             } => {
+                let _g = info_span!("gpucull").entered();
                 for (entity, mesh_instance_builder, mesh_culling_builder) in changed.drain(..) {
                     let Some(instance_data_index) = mesh_instance_builder.update(
                         entity,
@@ -1829,6 +1833,7 @@ pub fn collect_meshes_for_gpu_building(
                         .update(&mut mesh_culling_data_buffer, instance_data_index as usize);
                 }
 
+                let _g = info_span!("remove").entered();
                 for entity in removed.drain(..) {
                     remove_mesh_input_uniform(
                         entity,

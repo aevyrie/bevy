@@ -178,14 +178,14 @@ where
     /// We retain these so that, when the entity changes,
     /// [`Self::sweep_old_entities`] can quickly find the bin it was located in
     /// and remove it.
-    cached_entity_bin_keys: IndexMap<MainEntity, CachedBinnedEntity<BPI>, EntityHash>,
+    pub cached_entity_bin_keys: IndexMap<MainEntity, CachedBinnedEntity<BPI>, EntityHash>,
 
     /// The set of indices in [`Self::cached_entity_bin_keys`] that are
     /// confirmed to be up to date.
     ///
     /// Note that each bit in this bit set refers to an *index* in the
     /// [`IndexMap`] (i.e. a bucket in the hash table). They aren't entity IDs.
-    valid_cached_entity_bin_keys: FixedBitSet,
+    pub valid_cached_entity_bin_keys: FixedBitSet,
 
     /// The set of entities that changed bins this frame.
     ///
@@ -1429,6 +1429,12 @@ where
     #[inline]
     pub fn add(&mut self, item: I) {
         self.items.push(item);
+    }
+
+    /// Adds a number of [`PhaseItem`]s to this render phase.
+    #[inline]
+    pub fn extend<Iter: IntoIterator<Item = I>>(&mut self, items: Iter) {
+        self.items.extend(items);
     }
 
     /// Removes all [`PhaseItem`]s from this render phase.
