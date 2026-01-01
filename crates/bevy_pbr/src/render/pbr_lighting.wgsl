@@ -625,7 +625,7 @@ fn point_light(
 
     // Base layer
 
-    var specular_light: vec3<f32>;
+    var specular_light: vec4<f32>;
     let light_radius = (*light).position_radius.w;
 
     if (light_radius > 0.0) {
@@ -651,9 +651,9 @@ fn point_light(
         let specular_intensity = specular_L_intensity.w;
 
 #ifdef STANDARD_MATERIAL_ANISOTROPY
-        specular_light = specular_anisotropy(input, &specular_derived_input, L, specular_intensity);
+        specular_light = vec4(specular_anisotropy(input, &specular_derived_input, L, specular_intensity), 0.0);
 #else   // STANDARD_MATERIAL_ANISOTROPY
-        specular_light = specular(input, &specular_derived_input, specular_intensity);
+        specular_light = vec4(specular(input, &specular_derived_input, specular_intensity), 0.0);
 #endif  // STANDARD_MATERIAL_ANISOTROPY
     }
 
@@ -671,7 +671,7 @@ fn point_light(
         let clearcoat_roughness = (*input).layers[LAYER_CLEARCOAT].roughness;
         // Clearcoat is always dielectric, so F0 is 0.04.
         let clearcoat_F0 = vec3(0.04);
-        let clearcoat_specular_light = ltc::ltc_brdf(
+        let clearcoat_specular_light_res = ltc::ltc_brdf(
             clearcoat_N,
             V,
             P,
@@ -680,17 +680,14 @@ fn point_light(
             light_radius,
             clearcoat_F0,
         );
+        let clearcoat_specular_light = clearcoat_specular_light_res.xyz;
         
         // Frc is the specular clearcoat light.
         Frc = clearcoat_specular_light * clearcoat_strength;
         
         // We need an approximate Fresnel term for the clearcoat to darken the base layer.
         // For LTC, we can use the fresnel term from the LUT.
-        let clearcoat_NdotV = saturate(dot(clearcoat_N, V));
-        let clearcoat_uv = vec2(clearcoat_roughness, sqrt(1.0 - clearcoat_NdotV));
-        let clearcoat_uv_clamped = clearcoat_uv * ltc::LTC_LUT_SCALE + ltc::LTC_LUT_BIAS;
-        let clearcoat_t2 = textureSampleLevel(ltc::ltc_2_texture, ltc::ltc_sampler, clearcoat_uv_clamped, 0.0);
-        let clearcoat_Fc = (0.04 * clearcoat_t2.x + (1.0 - 0.04) * clearcoat_t2.y) * clearcoat_strength;
+        let clearcoat_Fc = clearcoat_specular_light_res.w * clearcoat_strength;
         inv_Fc = 1.0 - clearcoat_Fc;
     } else {
         // Perform specular input calculations again for the clearcoat layer. We
@@ -756,9 +753,9 @@ fn point_light(
     // Account for the Fresnel term from the clearcoat darkening the main layer.
     //
     // <https://google.github.io/filament/Filament.html#materialsystem/clearcoatmodel/integrationinthesurfaceresponse>
-    color = (diffuse + specular_light * inv_Fc) * inv_Fc + Frc;
+    color = (diffuse * (1.0 - specular_light.w) + specular_light.xyz * inv_Fc) * inv_Fc + Frc;
 #else   // STANDARD_MATERIAL_CLEARCOAT
-    color = diffuse + specular_light;
+    color = diffuse * (1.0 - specular_light.w) + specular_light.xyz;
 #endif  // STANDARD_MATERIAL_CLEARCOAT
 
     var texture_sample = 1f;
@@ -781,7 +778,7 @@ fn point_light(
 
     var attenuation_factor: vec3<f32>;
     if (light_radius > 0.0) {
-        attenuation_factor = vec3(rangeAttenuation * dot(light_to_frag, light_to_frag));
+        attenuation_factor = vec3(rangeAttenuation);
     } else {
         attenuation_factor = vec3(rangeAttenuation * derived_input.NdotL);
     }

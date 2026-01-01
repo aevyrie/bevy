@@ -2,6 +2,7 @@
 
 use bevy::app::AppExit;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::ecs::message::MessageWriter;
 use bevy::prelude::*;
 use bevy_render::view::screenshot::{save_to_disk, Screenshot};
 use bevy_render::view::Hdr;
@@ -15,6 +16,7 @@ fn main() {
         .add_systems(Update, (capture_screenshot, exit_after_frames))
         .run();
 }
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -79,9 +81,9 @@ fn capture_screenshot(mut commands: Commands, mut counter: Local<u32>) {
     *counter += 1;
 }
 
-fn exit_after_frames(mut _counter: Local<u32>, mut _app_exit_writer: MessageWriter<AppExit>) {
-    // if *counter == 100 {
-    //    _app_exit_writer.write(AppExit::Success);
-    // }
-    // *counter += 1;
+fn exit_after_frames(mut counter: Local<u32>, mut app_exit_writer: MessageWriter<AppExit>) {
+    if *counter == 100 {
+        app_exit_writer.write(AppExit::Success);
+    }
+    *counter += 1;
 }

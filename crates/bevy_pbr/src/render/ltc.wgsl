@@ -46,47 +46,43 @@ fn ltc_evaluate_sphere(
     }
     let T2 = cross(basis_z, T1);
 
-    // Geometry
+    // Transform light position to LTC space
     let L = light_pos - P;
-    let dist2 = dot(L, L);
-    let dist = max(sqrt(dist2), light_radius * 1.01);
-    let Lhat = L / dist;
-
-    // Sphere cap
-    let sinTheta = saturate(light_radius / dist);
-    let cosTheta = sqrt(saturate(1.0 - sinTheta * sinTheta));
-
-    // Transformed cosine axis
     let m_local = mat3x3<f32>(T1, T2, basis_z);
-    let k = normalize(transpose(m_inv) * vec3(0.0, 0.0, 1.0));
-    
-    // Angle between LTC axis and light center
-    // We need to transform Lhat into the local basis (T1, T2, basis_z)
-    let Lhat_local = transpose(m_local) * Lhat;
-    let cosAlpha = dot(k, Lhat_local);
+    let L_local = transpose(m_local) * L;
+    let L_ltc = m_inv * L_local;
+    let dist_ltc = length(L_ltc);
+    let Lhat_ltc = L_ltc / max(dist_ltc, 1e-6);
 
-    // Arvo spherical-cap cosine integral (exact)
+    // Approximate transformed sphere radius
+    // Det = m_inv[1][1] * (m_inv[0][0] * m_inv[2][2] - m_inv[2][0] * m_inv[0][2])
+    let det = m_inv[1][1] * (m_inv[0][0] * m_inv[2][2] - m_inv[2][0] * m_inv[0][2]);
+    let radius_scale = pow(abs(det), 0.333333);
+    let light_radius_ltc = light_radius * radius_scale;
+
+    // Frostbite/Unreal sphere integral (handles horizon clipping)
+    let cosTheta = Lhat_ltc.z;
+    let sinTheta = sqrt(saturate(1.0 - cosTheta * cosTheta));
+    let sinAlpha = saturate(light_radius_ltc / max(dist_ltc, 1e-6));
+    let cosAlpha = sqrt(saturate(1.0 - sinAlpha * sinAlpha));
+
     var I: f32;
-    if (cosAlpha <= -cosTheta) {
+    if (cosTheta >= cosAlpha) {
+        // Fully visible
+        I = sinAlpha * sinAlpha * cosTheta;
+    } else if (cosTheta <= -cosAlpha) {
+        // Fully invisible
         I = 0.0;
-    } else if (cosAlpha >= cosTheta) {
-        // fully visible
-        I = PI * sinTheta * sinTheta * cosAlpha;
     } else {
-        // partial (crescent) region
-        let x = cosAlpha / sinTheta;
-        let root = sqrt(saturate(1.0 - x * x));
-        I = sinTheta * sinTheta * (acos(clamp(-x, -1.0, 1.0)) * cosAlpha + sinTheta * root) * 0.5;
+        // Partially visible
+        let cotTheta = cosTheta / max(sinTheta, 1e-6);
+        let x = cotTheta * cosAlpha / max(sinAlpha, 1e-6);
+        let y = sqrt(saturate(1.0 - x * x));
+        I = (sinAlpha * sinAlpha * cosTheta * acos(clamp(-x, -1.0, 1.0)) + sinAlpha * cosAlpha * sinTheta * y) / PI;
     }
 
-    // Near-field correction
-    let sphereCorrection = (dist * dist) / (dist * dist - light_radius * light_radius);
-    I *= sphereCorrection;
-
-    // Normalize such that the punctual limit is cosAlpha / dist2
-    I /= max(1e-7, PI * sinTheta * sinTheta);
-
-    return I;
+    // Normalize such that the punctual limit is cosTheta / PI
+    return I / max(1e-7, PI * sinAlpha * sinAlpha);
 }
 
 fn ltc_brdf(
@@ -97,9 +93,9 @@ fn ltc_brdf(
     light_pos: vec3<f32>,
     light_radius: f32,
     F0: vec3<f32>,
-) -> vec3<f32> {
+) -> vec4<f32> {
     let NdotV = saturate(dot(N, V));
-    let uv = vec2(roughness, sqrt(1.0 - NdotV));
+    let uv = vec2(roughness, acos(NdotV) / (0.5 * PI));
     let uv_clamped = uv * LTC_LUT_SCALE + LTC_LUT_BIAS;
 
     let t1 = textureSampleLevel(ltc_1_texture, ltc_sampler, uv_clamped, 0.0);
@@ -113,13 +109,13 @@ fn ltc_brdf(
         vec3(t1.y, 0.0, t1.x)
     );
 
-    // For specular, use the reflection vector as the basis Z-axis
-    let R = reflect(-V, N);
-    let spec = ltc_evaluate_sphere(N, V, P, m_inv, light_pos, light_radius, R);
+    // Use the normal as the basis Z-axis for consistent horizon clipping
+    let spec = ltc_evaluate_sphere(N, V, P, m_inv, light_pos, light_radius, N);
 
     // t2.x is the magnitude (integral of the LTC BRDF)
     // t2.y is the fresnel term
-    return spec * (F0 * t2.x + (1.0 - F0) * t2.y);
+    let fresnel = F0 * t2.x + (1.0 - F0) * t2.y;
+    return vec4(spec * fresnel, t2.x);
 }
 
 fn ltc_diffuse(
@@ -131,24 +127,19 @@ fn ltc_diffuse(
     light_radius: f32,
 ) -> vec3<f32> {
     let NdotV = saturate(dot(N, V));
-    // For Lambertian diffuse, LTC is just the identity matrix.
+    let uv = vec2(roughness, acos(NdotV) / (0.5 * PI));
+    let uv_clamped = uv * LTC_LUT_SCALE + LTC_LUT_BIAS;
+    
     let m_inv = mat3x3<f32>(
         vec3(1.0, 0.0, 0.0),
         vec3(0.0, 1.0, 0.0),
         vec3(0.0, 0.0, 1.0)
     );
-
-    let uv = vec2(roughness, sqrt(1.0 - NdotV));
-    let uv_clamped = uv * LTC_LUT_SCALE + LTC_LUT_BIAS;
     let t_mag = textureSampleLevel(ltc_mag_texture, ltc_sampler, uv_clamped, 0.0);
 
     // For diffuse, use the normal as the basis Z-axis
-    // For Lambertian, m_inv is identity, so k is (0,0,1)
     let diff = ltc_evaluate_sphere(N, V, P, m_inv, light_pos, light_radius, N);
 
-    // For diffuse, we want to match Bevy's Fd_Burley or Lambertian.
-    // Punctual limit should be NdotL / PI.
-    // ltc_evaluate_sphere already returns something that approaches cosAlpha (NdotL) as radius -> 0.
-    // So we just need to divide by PI.
-    return vec3(diff * t_mag.x / PI);
+    // ltc_evaluate_sphere already returns something that approaches cosTheta / PI as radius -> 0.
+    return vec3(diff * t_mag.x);
 }
