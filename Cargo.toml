@@ -1118,6 +1118,18 @@ path = "examples/3d/3d_shapes.rs"
 # Causes an ICE on docs.rs
 doc-scrape-examples = false
 
+[[example]]
+name = "lighting_test"
+path = "examples/3d/lighting_test.rs"
+# Causes an ICE on docs.rs
+doc-scrape-examples = false
+
+[[example]]
+name = "lighting_test2"
+path = "examples/3d/lighting_test2.rs"
+# Causes an ICE on docs.rs
+doc-scrape-examples = false
+
 [package.metadata.example.3d_shapes]
 name = "3D Shapes"
 description = "A scene showcasing the built-in 3D shapes"
@@ -1466,6 +1478,11 @@ name = "Solari"
 description = "Demonstrates realtime dynamic raytraced lighting using Bevy Solari."
 category = "3D Rendering"
 wasm = false                                                                        # Raytracing is not supported on the web
+
+[[example]]
+name = "spherical_area_lights_headless"
+path = "examples/3d/spherical_area_lights_headless.rs"
+doc-scrape-examples = false
 
 [[example]]
 name = "spherical_area_lights"

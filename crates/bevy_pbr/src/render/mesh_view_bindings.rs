@@ -47,9 +47,10 @@ use crate::{
     resources::{AtmosphereBuffer, AtmosphereData, AtmosphereSampler, AtmosphereTextures},
     EnvironmentMapUniformBuffer, ExtractedAtmosphere, FogMeta, GlobalClusterableObjectMeta,
     GpuClusterableObjects, GpuFog, GpuLights, LightMeta, LightProbesBuffer, LightProbesUniform,
-    MeshPipeline, MeshPipelineKey, RenderViewLightProbes, ScreenSpaceAmbientOcclusionResources,
-    ScreenSpaceReflectionsBuffer, ScreenSpaceReflectionsUniform, ShadowSamplers,
-    ViewClusterBindings, ViewShadowBindings, CLUSTERED_FORWARD_STORAGE_BUFFER_COUNT,
+    LtcLuts, MeshPipeline, MeshPipelineKey, RenderViewLightProbes,
+    ScreenSpaceAmbientOcclusionResources, ScreenSpaceReflectionsBuffer,
+    ScreenSpaceReflectionsUniform, ShadowSamplers, ViewClusterBindings, ViewShadowBindings,
+    CLUSTERED_FORWARD_STORAGE_BUFFER_COUNT,
 };
 
 #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
@@ -410,6 +411,27 @@ fn layout_entries(
         ));
     }
 
+    // LTC
+    entries = entries.extend_with_indices((
+        // ltc_1_texture
+        (
+            32,
+            texture_2d(TextureSampleType::Float { filterable: true }),
+        ),
+        // ltc_2_texture
+        (
+            33,
+            texture_2d(TextureSampleType::Float { filterable: true }),
+        ),
+        // ltc_mag_texture
+        (
+            34,
+            texture_2d(TextureSampleType::Float { filterable: true }),
+        ),
+        // ltc_sampler
+        (35, sampler(SamplerBindingType::Filtering)),
+    ));
+
     let mut binding_array_entries = DynamicBindGroupLayoutEntries::new(ShaderStages::FRAGMENT);
     binding_array_entries = binding_array_entries.extend_with_indices((
         (0, environment_map_entries[0]),
@@ -599,11 +621,12 @@ pub fn prepare_mesh_view_bind_groups(
     visibility_ranges: Res<RenderVisibilityRanges>,
     ssr_buffer: Res<ScreenSpaceReflectionsBuffer>,
     oit_buffers: Res<OitBuffers>,
-    (decals_buffer, render_decals, atmosphere_buffer, atmosphere_sampler): (
+    (decals_buffer, render_decals, atmosphere_buffer, atmosphere_sampler, ltc_luts): (
         Res<DecalsBuffer>,
         Res<RenderClusteredDecals>,
         Option<Res<AtmosphereBuffer>>,
         Option<Res<AtmosphereSampler>>,
+        Res<LtcLuts>,
     ),
 ) {
     if let (
@@ -751,6 +774,27 @@ pub fn prepare_mesh_view_bind_groups(
                     (31, atmosphere_buffer_binding),
                 ));
             }
+
+            // LTC
+            let ltc_1_view = images
+                .get(&ltc_luts.ltc_1)
+                .map(|i| &i.texture_view)
+                .unwrap_or(&fallback_image.d2.texture_view);
+            let ltc_2_view = images
+                .get(&ltc_luts.ltc_2)
+                .map(|i| &i.texture_view)
+                .unwrap_or(&fallback_image.d2.texture_view);
+            let ltc_mag_view = images
+                .get(&ltc_luts.ltc_mag)
+                .map(|i| &i.texture_view)
+                .unwrap_or(&fallback_image.d2.texture_view);
+
+            entries = entries.extend_with_indices((
+                (32, ltc_1_view),
+                (33, ltc_2_view),
+                (34, ltc_mag_view),
+                (35, &fallback_image.d2.sampler),
+            ));
 
             let mut entries_binding_array = DynamicBindGroupEntries::new();
 

@@ -205,6 +205,7 @@ impl Plugin for PbrPlugin {
         load_shader_library!(app, "render/pbr_functions.wgsl");
         load_shader_library!(app, "render/rgb9e5.wgsl");
         load_shader_library!(app, "render/pbr_ambient.wgsl");
+        load_shader_library!(app, "render/ltc.wgsl");
         load_shader_library!(app, "render/pbr_fragment.wgsl");
         load_shader_library!(app, "render/pbr.wgsl");
         load_shader_library!(app, "render/pbr_prepass_functions.wgsl");
@@ -241,6 +242,7 @@ impl Plugin for PbrPlugin {
                 VolumetricFogPlugin,
                 ScreenSpaceReflectionsPlugin,
                 ClusteredDecalPlugin,
+                LtcPlugin,
             ))
             .add_plugins((
                 decal::ForwardDecalPlugin,

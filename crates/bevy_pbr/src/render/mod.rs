@@ -1,6 +1,7 @@
 mod fog;
 mod gpu_preprocess;
 mod light;
+pub mod ltc;
 pub(crate) mod mesh;
 mod mesh_bindings;
 mod mesh_view_bindings;
@@ -10,6 +11,7 @@ pub(crate) mod skin;
 pub use fog::*;
 pub use gpu_preprocess::*;
 pub use light::*;
+pub use ltc::*;
 pub use mesh::*;
 pub use mesh_bindings::MeshLayouts;
 pub use mesh_view_bindings::*;

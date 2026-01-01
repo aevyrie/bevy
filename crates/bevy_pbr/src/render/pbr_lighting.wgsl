@@ -3,6 +3,7 @@
 #import bevy_pbr::{
     mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
     mesh_view_bindings as view_bindings,
+    ltc,
     atmosphere::functions::{calculate_visible_sun_ratio, clamp_to_surface},
     atmosphere::bruneton_functions::transmittance_lut_r_mu_to_uv,
 }
@@ -570,31 +571,31 @@ fn cubemap_uv(direction: vec3<f32>, cubemap_type: u32) -> vec2<f32> {
     var corner_uv: vec2<u32> = vec2(0, 0);
     var face_size: vec2<f32>;
 
-    switch face_index {
-        case X_PLUS:  { face_uv = vec2<f32>(direction.z, -direction.y); divisor = direction.x; }
-        case X_MINUS: { face_uv = vec2<f32>(-direction.z, -direction.y); divisor = -direction.x; }
-        case Y_PLUS:  { face_uv = vec2<f32>(direction.x,  -direction.z); divisor = direction.y; }
-        case Y_MINUS: { face_uv = vec2<f32>(direction.x, direction.z); divisor = -direction.y; }
-        case Z_PLUS:  { face_uv = vec2<f32>(direction.x, direction.y); divisor = direction.z; }
-        case Z_MINUS: { face_uv = vec2<f32>(direction.x, -direction.y); divisor = -direction.z; }
+    switch (face_index) {
+        case 0u:  { face_uv = vec2<f32>(direction.z, -direction.y); divisor = direction.x; }
+        case 1u: { face_uv = vec2<f32>(-direction.z, -direction.y); divisor = -direction.x; }
+        case 2u:  { face_uv = vec2<f32>(direction.x,  -direction.z); divisor = direction.y; }
+        case 3u: { face_uv = vec2<f32>(direction.x, direction.z); divisor = -direction.y; }
+        case 5u:  { face_uv = vec2<f32>(direction.x, direction.y); divisor = direction.z; }
+        case 4u: { face_uv = vec2<f32>(direction.x, -direction.y); divisor = -direction.z; }
         default: {}
     }
     face_uv = (face_uv / divisor) * 0.5 + 0.5;
 
-    switch cubemap_type {
-        case CUBEMAP_TYPE_CROSS_VERTICAL: {
+    switch (cubemap_type) {
+        case 0u: {
             face_size = vec2(1.0/3.0, 1.0/4.0);
             corner_uv = vec2<u32>((0x111102u >> (4 * face_index)) & 0xFu, (0x132011u >> (4 * face_index)) & 0xFu);
         }
-        case CUBEMAP_TYPE_CROSS_HORIZONTAL: {
+        case 1u: {
             face_size = vec2(1.0/4.0, 1.0/3.0);
             corner_uv = vec2<u32>((0x131102u >> (4 * face_index)) & 0xFu, (0x112011u >> (4 * face_index)) & 0xFu);
         }
-        case CUBEMAP_TYPE_SEQUENCE_HORIZONTAL: {
+        case 3u: {
             face_size = vec2(1.0/6.0, 1.0);
             corner_uv.x = face_index;
         }
-        case CUBEMAP_TYPE_SEQUENCE_VERTICAL: {
+        case 2u: {
             face_size = vec2(1.0, 1.0/6.0);
             corner_uv.y = face_index;
         }
@@ -624,22 +625,37 @@ fn point_light(
 
     // Base layer
 
-    let specular_L_intensity = compute_specular_layer_values_for_point_light(
-        input,
-        LAYER_BASE,
-        V,
-        light_to_frag,
-        (*light).position_radius.w,
-    );
-    var specular_derived_input = derive_lighting_input(N, V, specular_L_intensity.xyz);
+    var specular_light: vec3<f32>;
+    let light_radius = (*light).position_radius.w;
 
-    let specular_intensity = specular_L_intensity.w;
+    if (light_radius > 0.0) {
+        specular_light = ltc::ltc_brdf(
+            N,
+            V,
+            P,
+            (*input).layers[LAYER_BASE].roughness,
+            (*light).position_radius.xyz,
+            light_radius,
+            (*input).F0_,
+        );
+    } else {
+        let specular_L_intensity = compute_specular_layer_values_for_point_light(
+            input,
+            LAYER_BASE,
+            V,
+            light_to_frag,
+            light_radius,
+        );
+        var specular_derived_input = derive_lighting_input(N, V, specular_L_intensity.xyz);
+
+        let specular_intensity = specular_L_intensity.w;
 
 #ifdef STANDARD_MATERIAL_ANISOTROPY
-    let specular_light = specular_anisotropy(input, &specular_derived_input, L, specular_intensity);
+        specular_light = specular_anisotropy(input, &specular_derived_input, L, specular_intensity);
 #else   // STANDARD_MATERIAL_ANISOTROPY
-    let specular_light = specular(input, &specular_derived_input, specular_intensity);
+        specular_light = specular(input, &specular_derived_input, specular_intensity);
 #endif  // STANDARD_MATERIAL_ANISOTROPY
+    }
 
     // Clearcoat
 
@@ -648,29 +664,59 @@ fn point_light(
     let clearcoat_N = (*input).layers[LAYER_CLEARCOAT].N;
     let clearcoat_strength = (*input).clearcoat_strength;
 
-    // Perform specular input calculations again for the clearcoat layer. We
-    // can't reuse the above because the clearcoat normal might be different
-    // from the main layer normal.
-    let clearcoat_specular_L_intensity = compute_specular_layer_values_for_point_light(
-        input,
-        LAYER_CLEARCOAT,
-        V,
-        light_to_frag,
-        (*light).position_radius.w,
-    );
-    var clearcoat_specular_derived_input =
-        derive_lighting_input(clearcoat_N, V, clearcoat_specular_L_intensity.xyz);
+    var Frc: vec3<f32>;
+    var inv_Fc: f32;
 
-    // Calculate the specular light.
-    let clearcoat_specular_intensity = clearcoat_specular_L_intensity.w;
-    let Fc_Frc = specular_clearcoat(
-        input,
-        &clearcoat_specular_derived_input,
-        clearcoat_strength,
-        clearcoat_specular_intensity
-    );
-    let inv_Fc = 1.0 - Fc_Frc.r;    // Inverse Fresnel term.
-    let Frc = Fc_Frc.g;             // Clearcoat light.
+    if (light_radius > 0.0) {
+        let clearcoat_roughness = (*input).layers[LAYER_CLEARCOAT].roughness;
+        // Clearcoat is always dielectric, so F0 is 0.04.
+        let clearcoat_F0 = vec3(0.04);
+        let clearcoat_specular_light = ltc::ltc_brdf(
+            clearcoat_N,
+            V,
+            P,
+            clearcoat_roughness,
+            (*light).position_radius.xyz,
+            light_radius,
+            clearcoat_F0,
+        );
+        
+        // Frc is the specular clearcoat light.
+        Frc = clearcoat_specular_light * clearcoat_strength;
+        
+        // We need an approximate Fresnel term for the clearcoat to darken the base layer.
+        // For LTC, we can use the fresnel term from the LUT.
+        let clearcoat_NdotV = saturate(dot(clearcoat_N, V));
+        let clearcoat_uv = vec2(clearcoat_roughness, sqrt(1.0 - clearcoat_NdotV));
+        let clearcoat_uv_clamped = clearcoat_uv * ltc::LTC_LUT_SCALE + ltc::LTC_LUT_BIAS;
+        let clearcoat_t2 = textureSampleLevel(ltc::ltc_2_texture, ltc::ltc_sampler, clearcoat_uv_clamped, 0.0);
+        let clearcoat_Fc = (0.04 * clearcoat_t2.x + (1.0 - 0.04) * clearcoat_t2.y) * clearcoat_strength;
+        inv_Fc = 1.0 - clearcoat_Fc;
+    } else {
+        // Perform specular input calculations again for the clearcoat layer. We
+        // can't reuse the above because the clearcoat normal might be different
+        // from the main layer normal.
+        let clearcoat_specular_L_intensity = compute_specular_layer_values_for_point_light(
+            input,
+            LAYER_CLEARCOAT,
+            V,
+            light_to_frag,
+            light_radius,
+        );
+        var clearcoat_specular_derived_input =
+            derive_lighting_input(clearcoat_N, V, clearcoat_specular_L_intensity.xyz);
+
+        // Calculate the specular light.
+        let clearcoat_specular_intensity = clearcoat_specular_L_intensity.w;
+        let Fc_Frc = specular_clearcoat(
+            input,
+            &clearcoat_specular_derived_input,
+            clearcoat_strength,
+            clearcoat_specular_intensity
+        );
+        inv_Fc = 1.0 - Fc_Frc.r;    // Inverse Fresnel term.
+        Frc = vec3(Fc_Frc.g);             // Clearcoat light.
+    }
 #endif  // STANDARD_MATERIAL_CLEARCOAT
 
     // Diffuse.
@@ -678,7 +724,18 @@ fn point_light(
     var derived_input = derive_lighting_input(N, V, L);
     var diffuse = vec3(0.0);
     if (enable_diffuse) {
-        diffuse = diffuse_color * Fd_Burley(input, &derived_input);
+        if (light_radius > 0.0) {
+            diffuse = diffuse_color * ltc::ltc_diffuse(
+                N,
+                V,
+                P,
+                (*input).layers[LAYER_BASE].roughness,
+                (*light).position_radius.xyz,
+                light_radius,
+            );
+        } else {
+            diffuse = diffuse_color * Fd_Burley(input, &derived_input);
+        }
     }
 
     // See https://google.github.io/filament/Filament.html#mjx-eqn-pointLightLuminanceEquation
@@ -722,8 +779,15 @@ fn point_light(
     }
 #endif
 
+    var attenuation_factor: vec3<f32>;
+    if (light_radius > 0.0) {
+        attenuation_factor = vec3(rangeAttenuation * dot(light_to_frag, light_to_frag));
+    } else {
+        attenuation_factor = vec3(rangeAttenuation * derived_input.NdotL);
+    }
+
     return color * (*light).color_inverse_square_range.rgb *
-        (rangeAttenuation * derived_input.NdotL) * texture_sample;
+        attenuation_factor * texture_sample;
 }
 
 fn spot_light(

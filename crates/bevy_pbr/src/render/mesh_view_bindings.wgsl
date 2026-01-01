@@ -101,6 +101,11 @@ const VISIBILITY_RANGE_UNIFORM_BUFFER_SIZE: u32 = 64u;
 @group(0) @binding(31) var<storage> atmosphere_data: atmosphere::AtmosphereData;
 #endif // ATMOSPHERE
 
+@group(0) @binding(32) var ltc_1_texture: texture_2d<f32>;
+@group(0) @binding(33) var ltc_2_texture: texture_2d<f32>;
+@group(0) @binding(34) var ltc_mag_texture: texture_2d<f32>;
+@group(0) @binding(35) var ltc_sampler: sampler;
+
 #ifdef MULTIPLE_LIGHT_PROBES_IN_ARRAY
 @group(1) @binding(0) var diffuse_environment_maps: binding_array<texture_cube<f32>, 8u>;
 @group(1) @binding(1) var specular_environment_maps: binding_array<texture_cube<f32>, 8u>;
