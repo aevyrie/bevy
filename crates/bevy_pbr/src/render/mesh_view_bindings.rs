@@ -88,7 +88,7 @@ bitflags::bitflags! {
         const DEFERRED_PREPASS            = 1 << 4;
         const OIT_ENABLED                 = 1 << 5;
         const ATMOSPHERE                  = 1 << 6;
-        const STBN                        = 1 << 7;
+        const BLUE_NOISE_TEXTURE          = 1 << 7;
     }
 }
 
@@ -137,7 +137,7 @@ impl MeshPipelineViewLayoutKey {
             } else {
                 Default::default()
             },
-            if self.contains(Key::STBN) {
+            if self.contains(Key::BLUE_NOISE_TEXTURE) {
                 "_stbn"
             } else {
                 Default::default()
@@ -173,7 +173,7 @@ impl From<MeshPipelineKey> for MeshPipelineViewLayoutKey {
         }
 
         if cfg!(feature = "bluenoise_texture") {
-            result |= MeshPipelineViewLayoutKey::STBN;
+            result |= MeshPipelineViewLayoutKey::BLUE_NOISE_TEXTURE;
         }
 
         result
@@ -427,7 +427,7 @@ fn layout_entries(
     }
 
     // Blue noise
-    if layout_key.contains(MeshPipelineViewLayoutKey::STBN) {
+    if layout_key.contains(MeshPipelineViewLayoutKey::BLUE_NOISE_TEXTURE) {
         entries = entries.extend_with_indices(((
             33,
             texture_2d_array(TextureSampleType::Float { filterable: false }),
@@ -692,7 +692,7 @@ pub fn prepare_mesh_view_bind_groups(
                 layout_key |= MeshPipelineViewLayoutKey::ATMOSPHERE;
             }
             if cfg!(feature = "bluenoise_texture") {
-                layout_key |= MeshPipelineViewLayoutKey::STBN;
+                layout_key |= MeshPipelineViewLayoutKey::BLUE_NOISE_TEXTURE;
             }
 
             let layout = mesh_pipeline.get_view_layout(layout_key);
@@ -788,7 +788,7 @@ pub fn prepare_mesh_view_bind_groups(
                 ));
             }
 
-            if layout_key.contains(MeshPipelineViewLayoutKey::STBN) {
+            if layout_key.contains(MeshPipelineViewLayoutKey::BLUE_NOISE_TEXTURE) {
                 let stbn_view = &images
                     .get(&blue_noise.texture)
                     .expect("STBN texture is added unconditionally with at least a placeholder")
