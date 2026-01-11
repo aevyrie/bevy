@@ -210,9 +210,7 @@ fn environment_map_light(
     found_diffuse_indirect: bool,
 ) -> EnvironmentMapLight {
     // Unpack.
-    let roughness = (*input).layers[LAYER_BASE].roughness;
     let diffuse_color = (*input).diffuse_color;
-    let NdotV = (*input).layers[LAYER_BASE].NdotV;
     let F_ab = (*input).F_ab;
     let F0 = (*input).F0_;
     let world_position = (*input).P;

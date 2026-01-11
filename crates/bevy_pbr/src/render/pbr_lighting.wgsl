@@ -827,7 +827,6 @@ fn directional_light(
 ) -> vec3<f32> {
     // Unpack.
     let diffuse_color = (*input).diffuse_color;
-    let NdotV = (*input).layers[LAYER_BASE].NdotV;
     let N = (*input).layers[LAYER_BASE].N;
     let V = (*input).V;
     let roughness = (*input).layers[LAYER_BASE].roughness;
