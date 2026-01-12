@@ -26,11 +26,15 @@ use bevy::{
 const FOCAL_DISTANCE_SPEED: f32 = 0.05;
 /// The increments in which the user can adjust the f-number, in units per frame.
 const APERTURE_F_STOP_SPEED: f32 = 0.01;
+/// The increments in which the user can adjust the sharpness threshold, in meters per frame.
+const SHARPNESS_THRESHOLD_SPEED: f32 = 0.001;
 
 /// The minimum distance that we allow the user to focus on.
 const MIN_FOCAL_DISTANCE: f32 = 0.01;
 /// The minimum f-number that we allow the user to set.
 const MIN_APERTURE_F_STOPS: f32 = 0.05;
+/// The minimum sharpness threshold.
+const MIN_SHARPNESS_THRESHOLD: f32 = 0.0;
 
 /// A resource that stores the settings that the user can change.
 #[derive(Clone, Copy, Resource)]
@@ -43,6 +47,9 @@ struct AppSettings {
     ///
     /// [f-number]: https://en.wikipedia.org/wiki/F-number
     aperture_f_stops: f32,
+
+    /// The sharpness threshold.
+    sharpness_threshold: f32,
 
     /// Whether depth of field is on, and, if so, whether we're in Gaussian or
     /// bokeh mode.
@@ -120,10 +127,21 @@ fn adjust_focus(input: Res<ButtonInput<KeyCode>>, mut app_settings: ResMut<AppSe
         0.0
     };
 
+    // Change the sharpness threshold if the user requested.
+    let sharpness_threshold_delta = if input.pressed(KeyCode::KeyO) {
+        -SHARPNESS_THRESHOLD_SPEED
+    } else if input.pressed(KeyCode::KeyP) {
+        SHARPNESS_THRESHOLD_SPEED
+    } else {
+        0.0
+    };
+
     app_settings.focal_distance =
         (app_settings.focal_distance + distance_delta).max(MIN_FOCAL_DISTANCE);
     app_settings.aperture_f_stops =
         (app_settings.aperture_f_stops + f_stop_delta).max(MIN_APERTURE_F_STOPS);
+    app_settings.sharpness_threshold =
+        (app_settings.sharpness_threshold + sharpness_threshold_delta).max(MIN_SHARPNESS_THRESHOLD);
 }
 
 /// Changes the depth of field mode (Gaussian, bokeh, off) per user inputs.
@@ -150,6 +168,9 @@ impl Default for AppSettings {
             // This is a really low F-number, but we want to demonstrate the
             // effect, even if it's kind of unrealistic.
             aperture_f_stops: 1.0 / 8.0,
+
+            // The default sharpness threshold.
+            sharpness_threshold: 0.1,
 
             // Turn on bokeh by default, as it's the nicest-looking technique.
             mode: Some(DepthOfFieldMode::Bokeh),
@@ -222,6 +243,7 @@ impl From<AppSettings> for Option<DepthOfField> {
             mode,
             focal_distance: app_settings.focal_distance,
             aperture_f_stops: app_settings.aperture_f_stops,
+            sharpness_threshold: app_settings.sharpness_threshold,
             max_depth: 14.0,
             ..default()
         })
@@ -244,11 +266,13 @@ impl AppSettings {
         format!(
             "Focal distance: {:.2} m (Press Up/Down to change)
 Aperture F-stops: f/{:.3} (Press Left/Right to change)
+Sharpness threshold: {:.3} m (Press P/O to change)
 Sensor height: {:.2}mm
 Focal length: {:.2}mm
 Mode: {} (Press Space to change)",
             self.focal_distance,
             self.aperture_f_stops,
+            self.sharpness_threshold,
             sensor_height * 1000.0,
             dof::calculate_focal_length(sensor_height, fov) * 1000.0,
             match mode {

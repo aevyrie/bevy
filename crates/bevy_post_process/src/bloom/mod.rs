@@ -79,24 +79,10 @@ impl Plugin for BloomPlugin {
             )
             // Add bloom to the 3d render graph
             .add_render_graph_node::<ViewNodeRunner<BloomNode>>(Core3d, Node3d::Bloom)
-            .add_render_graph_edges(
-                Core3d,
-                (
-                    Node3d::StartMainPassPostProcessing,
-                    Node3d::Bloom,
-                    Node3d::Tonemapping,
-                ),
-            )
             // Add bloom to the 2d render graph
             .add_render_graph_node::<ViewNodeRunner<BloomNode>>(Core2d, Node2d::Bloom)
-            .add_render_graph_edges(
-                Core2d,
-                (
-                    Node2d::StartMainPassPostProcessing,
-                    Node2d::Bloom,
-                    Node2d::Tonemapping,
-                ),
-            );
+            .add_systems(RenderStartup, add_bloom_render_graph_edges)
+            .add_render_graph_edges(Core2d, (Node2d::StartMainPassPostProcessing, Node2d::Bloom));
     }
 }
 
@@ -310,6 +296,38 @@ impl ViewNode for BloomNode {
         });
 
         Ok(())
+    }
+}
+
+fn add_bloom_render_graph_edges(mut render_graph: ResMut<bevy_render::render_graph::RenderGraph>) {
+    let subgraph_3d = render_graph.sub_graph_mut(Core3d);
+
+    if subgraph_3d.get_node_state(Node3d::Tonemapping).is_ok() {
+        subgraph_3d.add_node_edge(Node3d::Bloom, Node3d::Tonemapping);
+    }
+
+    if subgraph_3d.get_node_state(Node3d::Taa).is_ok() {
+        subgraph_3d.add_node_edge(Node3d::Taa, Node3d::Bloom);
+    }
+
+    if subgraph_3d
+        .get_node_state(Node3d::DlssSuperResolution)
+        .is_ok()
+    {
+        subgraph_3d.add_node_edge(Node3d::DlssSuperResolution, Node3d::Bloom);
+    }
+
+    if subgraph_3d
+        .get_node_state(Node3d::DlssRayReconstruction)
+        .is_ok()
+    {
+        subgraph_3d.add_node_edge(Node3d::DlssRayReconstruction, Node3d::Bloom);
+    }
+
+    let subgraph_2d = render_graph.sub_graph_mut(Core2d);
+
+    if subgraph_2d.get_node_state(Node2d::Tonemapping).is_ok() {
+        subgraph_2d.add_node_edge(Node2d::Bloom, Node2d::Tonemapping);
     }
 }
 

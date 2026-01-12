@@ -227,22 +227,39 @@ impl Plugin for EffectStackPlugin {
                 Core3d,
                 Node3d::PostProcessing,
             )
-            .add_render_graph_edges(
-                Core3d,
-                (
-                    Node3d::DepthOfField,
-                    Node3d::PostProcessing,
-                    Node3d::Tonemapping,
-                ),
-            )
+            .add_systems(RenderStartup, add_post_processing_render_graph_edges)
             .add_render_graph_node::<ViewNodeRunner<PostProcessingNode>>(
                 Core2d,
                 Node2d::PostProcessing,
-            )
-            .add_render_graph_edges(
-                Core2d,
-                (Node2d::Bloom, Node2d::PostProcessing, Node2d::Tonemapping),
             );
+    }
+}
+
+fn add_post_processing_render_graph_edges(
+    mut render_graph: ResMut<bevy_render::render_graph::RenderGraph>,
+) {
+    let subgraph_3d = render_graph.sub_graph_mut(Core3d);
+
+    if subgraph_3d.get_node_state(Node3d::Tonemapping).is_ok() {
+        subgraph_3d.add_node_edge(Node3d::PostProcessing, Node3d::Tonemapping);
+    }
+
+    if subgraph_3d.get_node_state(Node3d::DepthOfField).is_ok() {
+        subgraph_3d.add_node_edge(Node3d::DepthOfField, Node3d::PostProcessing);
+    }
+
+    if subgraph_3d.get_node_state(Node3d::Bloom).is_ok() {
+        subgraph_3d.add_node_edge(Node3d::Bloom, Node3d::PostProcessing);
+    }
+
+    let subgraph_2d = render_graph.sub_graph_mut(Core2d);
+
+    if subgraph_2d.get_node_state(Node2d::Tonemapping).is_ok() {
+        subgraph_2d.add_node_edge(Node2d::PostProcessing, Node2d::Tonemapping);
+    }
+
+    if subgraph_2d.get_node_state(Node2d::Bloom).is_ok() {
+        subgraph_2d.add_node_edge(Node2d::Bloom, Node2d::PostProcessing);
     }
 }
 

@@ -14,6 +14,7 @@ use bevy_ecs::{
     query::{QueryItem, With},
     reflect::ReflectComponent,
     schedule::IntoScheduleConfigs,
+    system::ResMut,
 };
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
@@ -156,13 +157,22 @@ impl Plugin for MotionBlurPlugin {
                 Core3d,
                 Node3d::MotionBlur,
             )
-            .add_render_graph_edges(
-                Core3d,
-                (
-                    Node3d::StartMainPassPostProcessing,
-                    Node3d::MotionBlur,
-                    Node3d::Bloom, // we want blurred areas to bloom and tonemap properly.
-                ),
-            );
+            .add_systems(RenderStartup, add_motion_blur_render_graph_edges);
+    }
+}
+
+fn add_motion_blur_render_graph_edges(
+    mut render_graph: ResMut<bevy_render::render_graph::RenderGraph>,
+) {
+    let subgraph = render_graph.sub_graph_mut(Core3d);
+
+    subgraph.add_node_edge(Node3d::StartMainPassPostProcessing, Node3d::MotionBlur);
+
+    if subgraph.get_node_state(Node3d::Bloom).is_ok() {
+        subgraph.add_node_edge(Node3d::MotionBlur, Node3d::Bloom);
+    }
+
+    if subgraph.get_node_state(Node3d::Tonemapping).is_ok() {
+        subgraph.add_node_edge(Node3d::MotionBlur, Node3d::Tonemapping);
     }
 }

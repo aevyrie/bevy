@@ -69,16 +69,21 @@ impl Plugin for TemporalAntiAliasPlugin {
                 ),
             )
             .add_render_graph_node::<ViewNodeRunner<TemporalAntiAliasNode>>(Core3d, Node3d::Taa)
-            .add_render_graph_edges(
-                Core3d,
-                (
-                    Node3d::StartMainPassPostProcessing,
-                    Node3d::MotionBlur, // Running before TAA reduces edge artifacts and noise
-                    Node3d::Taa,
-                    Node3d::Bloom,
-                    Node3d::Tonemapping,
-                ),
-            );
+            .add_systems(RenderStartup, add_taa_render_graph_edges);
+    }
+}
+
+fn add_taa_render_graph_edges(mut render_graph: ResMut<bevy_render::render_graph::RenderGraph>) {
+    let subgraph = render_graph.sub_graph_mut(Core3d);
+
+    subgraph.add_node_edge(Node3d::StartMainPassPostProcessing, Node3d::Taa);
+
+    if subgraph.get_node_state(Node3d::MotionBlur).is_ok() {
+        subgraph.add_node_edge(Node3d::Taa, Node3d::MotionBlur);
+    }
+
+    if subgraph.get_node_state(Node3d::Tonemapping).is_ok() {
+        subgraph.add_node_edge(Node3d::Taa, Node3d::Tonemapping);
     }
 }
 

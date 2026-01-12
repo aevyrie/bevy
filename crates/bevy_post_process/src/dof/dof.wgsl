@@ -18,8 +18,13 @@
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 #import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::view_transformations::depth_ndc_to_view_z
-#import bevy_post_process::gaussian_blur::gaussian_blur
 #import bevy_render::view::View
+
+fn sample_depth(uv: vec2<f32>) -> f32 {
+    let frag_coord = vec2<i32>(floor(uv * vec2<f32>(textureDimensions(depth_texture))));
+    let raw_depth = textureLoad(depth_texture, frag_coord, 0);
+    return min(-depth_ndc_to_view_z(raw_depth), dof_params.max_depth);
+}
 
 // Parameters that control the depth of field effect. See
 // `bevy_core_pipeline::dof::DepthOfFieldUniforms` for information on what these
@@ -56,12 +61,14 @@ struct DepthOfFieldParams {
     /// [`DepthOfField`] for more information.
     max_depth: f32,
 
+    /// The threshold, in meters, for determining if a fragment is "sharp"
+    /// enough to be discarded when blurring background fragments.
+    sharpness_threshold: f32,
+
     /// Padding.
     pad_a: u32,
     /// Padding.
     pad_b: u32,
-    /// Padding.
-    pad_c: u32,
 }
 
 // The first bokeh pass outputs to two render targets. We declare them here.
@@ -122,9 +129,8 @@ fn calculate_circle_of_confusion(in_frag_coord: vec4<f32>) -> f32 {
     let max_coc_diameter = dof_params.max_circle_of_confusion_diameter;
 
     // Sample the depth.
-    let frag_coord = vec2<i32>(floor(in_frag_coord.xy));
-    let raw_depth = textureLoad(depth_texture, frag_coord, 0);
-    let depth = min(-depth_ndc_to_view_z(raw_depth), dof_params.max_depth);
+    let uv = in_frag_coord.xy / vec2<f32>(textureDimensions(color_texture_a));
+    let depth = sample_depth(uv);
 
     // Calculate the circle of confusion.
     //
@@ -151,15 +157,27 @@ fn box_blur_a(frag_coord: vec4<f32>, coc: f32, frag_offset: vec2<f32>) -> vec4<f
     let support = i32(round(coc * 0.5));
     let uv = frag_coord.xy / vec2<f32>(textureDimensions(color_texture_a));
     let offset = frag_offset / vec2<f32>(textureDimensions(color_texture_a));
+    let focus = dof_params.focal_distance;
+    let center_depth = sample_depth(uv);
 
     // Accumulate samples in a single direction.
     var sum = vec3(0.0);
+    var weight_sum = 0.0;
     for (var i = 0; i <= support; i += 1) {
-        sum += textureSampleLevel(
-            color_texture_a, color_texture_sampler, uv + offset * f32(i), 0.0).rgb;
+        let sample_uv = uv + offset * f32(i);
+        let sample_depth = sample_depth(sample_uv);
+        var weight = 1.0;
+
+        if center_depth > focus && sample_depth < center_depth {
+            let dist = abs(sample_depth - focus);
+            weight = smoothstep(0.75 * dof_params.sharpness_threshold, dof_params.sharpness_threshold, dist);
+        }
+
+        sum += textureSampleLevel(color_texture_a, color_texture_sampler, sample_uv, 0.0).rgb * weight;
+        weight_sum += weight;
     }
 
-    return vec4(sum / vec3(1.0 + f32(support)), 1.0);
+    return vec4(sum / max(weight_sum, 0.0001), 1.0);
 }
 
 // Performs a box blur in a single direction, sampling `color_texture_b`.
@@ -177,15 +195,27 @@ fn box_blur_b(frag_coord: vec4<f32>, coc: f32, frag_offset: vec2<f32>) -> vec4<f
     let support = i32(round(coc * 0.5));
     let uv = frag_coord.xy / vec2<f32>(textureDimensions(color_texture_b));
     let offset = frag_offset / vec2<f32>(textureDimensions(color_texture_b));
+    let focus = dof_params.focal_distance;
+    let center_depth = sample_depth(uv);
 
     // Accumulate samples in a single direction.
     var sum = vec3(0.0);
+    var weight_sum = 0.0;
     for (var i = 0; i <= support; i += 1) {
-        sum += textureSampleLevel(
-            color_texture_b, color_texture_sampler, uv + offset * f32(i), 0.0).rgb;
+        let sample_uv = uv + offset * f32(i);
+        let sample_depth = sample_depth(sample_uv);
+        var weight = 1.0;
+
+        if center_depth > focus && sample_depth < center_depth {
+            let dist = abs(sample_depth - focus);
+            weight = smoothstep(0.75 * dof_params.sharpness_threshold, dof_params.sharpness_threshold, dist);
+        }
+
+        sum += textureSampleLevel(color_texture_b, color_texture_sampler, sample_uv, 0.0).rgb * weight;
+        weight_sum += weight;
     }
 
-    return vec4(sum / vec3(1.0 + f32(support)), 1.0);
+    return vec4(sum / max(weight_sum, 0.0001), 1.0);
 }
 #endif
 
@@ -193,14 +223,108 @@ fn box_blur_b(frag_coord: vec4<f32>, coc: f32, frag_offset: vec2<f32>) -> vec4<f
 @fragment
 fn gaussian_horizontal(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let coc = calculate_circle_of_confusion(in.position);
-    return gaussian_blur(color_texture_a, color_texture_sampler, in.position, coc, vec2(1.0, 0.0));
+    // Usually σ (the standard deviation) is half the radius, and the radius is
+    // half the CoC. So we multiply by 0.25.
+    let sigma = coc * 0.25;
+
+    // 1.5σ is a good, somewhat aggressive default for support—the number of
+    // texels on each side of the center that we process.
+    let support = i32(ceil(sigma * 1.5));
+    let uv = in.position.xy / vec2<f32>(textureDimensions(color_texture_a));
+    let offset = vec2(1.0, 0.0) / vec2<f32>(textureDimensions(color_texture_a));
+
+    let focus = dof_params.focal_distance;
+    let center_depth = sample_depth(uv);
+
+    // The probability density function of the Gaussian blur is (up to constant factors) `exp(-1 / 2σ² *
+    // x²). We precalculate the constant factor here to avoid having to
+    // calculate it in the inner loop.
+    let exp_factor = -1.0 / (2.0 * sigma * sigma);
+
+    // Accumulate samples on both sides of the current texel.
+    var sum = textureSampleLevel(color_texture_a, color_texture_sampler, uv, 0.0).rgb;
+    var weight_sum = 1.0;
+    for (var i = 1; i <= support; i += 1) {
+        let w = exp(exp_factor * f32(i) * f32(i));
+        
+        // Positive offset
+        let uv_p = uv + offset * f32(i);
+        let depth_p = sample_depth(uv_p);
+        var weight_p = w;
+        if center_depth > focus && depth_p < center_depth {
+            let dist = abs(depth_p - focus);
+            weight_p *= smoothstep(0.75 * dof_params.sharpness_threshold, dof_params.sharpness_threshold, dist);
+        }
+
+        // Negative offset
+        let uv_n = uv - offset * f32(i);
+        let depth_n = sample_depth(uv_n);
+        var weight_n = w;
+        if center_depth > focus && depth_n < center_depth {
+            let dist = abs(depth_n - focus);
+            weight_n *= smoothstep(0.75 * dof_params.sharpness_threshold, dof_params.sharpness_threshold, dist);
+        }
+
+        sum += textureSampleLevel(color_texture_a, color_texture_sampler, uv_p, 0.0).rgb * weight_p;
+        sum += textureSampleLevel(color_texture_a, color_texture_sampler, uv_n, 0.0).rgb * weight_n;
+        weight_sum += weight_p + weight_n;
+    }
+
+    return vec4(sum / max(weight_sum, 0.0001), 1.0);
 }
 
 // Calculates the vertical component of the separable Gaussian blur.
 @fragment
 fn gaussian_vertical(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let coc = calculate_circle_of_confusion(in.position);
-    return gaussian_blur(color_texture_a, color_texture_sampler, in.position, coc, vec2(0.0, 1.0));
+    // Usually σ (the standard deviation) is half the radius, and the radius is
+    // half the CoC. So we multiply by 0.25.
+    let sigma = coc * 0.25;
+
+    // 1.5σ is a good, somewhat aggressive default for support—the number of
+    // texels on each side of the center that we process.
+    let support = i32(ceil(sigma * 1.5));
+    let uv = in.position.xy / vec2<f32>(textureDimensions(color_texture_a));
+    let offset = vec2(0.0, 1.0) / vec2<f32>(textureDimensions(color_texture_a));
+
+    let focus = dof_params.focal_distance;
+    let center_depth = sample_depth(uv);
+
+    // The probability density function of the Gaussian blur is (up to constant factors) `exp(-1 / 2σ² *
+    // x²). We precalculate the constant factor here to avoid having to
+    // calculate it in the inner loop.
+    let exp_factor = -1.0 / (2.0 * sigma * sigma);
+
+    // Accumulate samples on both sides of the current texel.
+    var sum = textureSampleLevel(color_texture_a, color_texture_sampler, uv, 0.0).rgb;
+    var weight_sum = 1.0;
+    for (var i = 1; i <= support; i += 1) {
+        let w = exp(exp_factor * f32(i) * f32(i));
+        
+        // Positive offset
+        let uv_p = uv + offset * f32(i);
+        let depth_p = sample_depth(uv_p);
+        var weight_p = w;
+        if center_depth > focus && depth_p < center_depth {
+            let dist = abs(depth_p - focus);
+            weight_p *= smoothstep(0.75 * dof_params.sharpness_threshold, dof_params.sharpness_threshold, dist);
+        }
+
+        // Negative offset
+        let uv_n = uv - offset * f32(i);
+        let depth_n = sample_depth(uv_n);
+        var weight_n = w;
+        if center_depth > focus && depth_n < center_depth {
+            let dist = abs(depth_n - focus);
+            weight_n *= smoothstep(0.75 * dof_params.sharpness_threshold, dof_params.sharpness_threshold, dist);
+        }
+
+        sum += textureSampleLevel(color_texture_a, color_texture_sampler, uv_p, 0.0).rgb * weight_p;
+        sum += textureSampleLevel(color_texture_a, color_texture_sampler, uv_n, 0.0).rgb * weight_n;
+        weight_sum += weight_p + weight_n;
+    }
+
+    return vec4(sum / max(weight_sum, 0.0001), 1.0);
 }
 
 // Calculates the vertical and first diagonal components of the separable

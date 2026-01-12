@@ -196,17 +196,22 @@ impl Plugin for DlssPlugin {
                 Core3d,
                 Node3d::DlssRayReconstruction,
             )
-            .add_render_graph_edges(
-                Core3d,
-                (
-                    Node3d::EndMainPass,
-                    Node3d::MotionBlur, // Running before DLSS reduces edge artifacts and noise
-                    Node3d::DlssSuperResolution,
-                    Node3d::DlssRayReconstruction,
-                    Node3d::Bloom,
-                    Node3d::Tonemapping,
-                ),
-            );
+            .add_systems(RenderStartup, add_dlss_render_graph_edges);
+    }
+}
+
+fn add_dlss_render_graph_edges(mut render_graph: ResMut<bevy_render::render_graph::RenderGraph>) {
+    let subgraph = render_graph.sub_graph_mut(Core3d);
+
+    subgraph.add_node_edge(Node3d::EndMainPass, Node3d::DlssSuperResolution);
+    subgraph.add_node_edge(Node3d::DlssSuperResolution, Node3d::DlssRayReconstruction);
+
+    if subgraph.get_node_state(Node3d::MotionBlur).is_ok() {
+        subgraph.add_node_edge(Node3d::DlssRayReconstruction, Node3d::MotionBlur);
+    }
+
+    if subgraph.get_node_state(Node3d::Tonemapping).is_ok() {
+        subgraph.add_node_edge(Node3d::DlssRayReconstruction, Node3d::Tonemapping);
     }
 }
 

@@ -120,6 +120,28 @@ pub struct DepthOfField {
     /// this value can be used to essentially adjust how "far away" the skybox
     /// or background are.
     pub max_depth: f32,
+
+    /// The threshold, in meters, for determining if a fragment is "sharp"
+    /// enough to be discarded when blurring background fragments.
+    ///
+    /// If a sample is in front of the fragment being blurred, and its distance
+    /// to the focal plane is less than this value, it will be discarded.
+    pub sharpness_threshold: f32,
+}
+
+impl Default for DepthOfField {
+    fn default() -> Self {
+        let physical_camera_default = PhysicalCameraParameters::default();
+        Self {
+            focal_distance: 10.0,
+            aperture_f_stops: physical_camera_default.aperture_f_stops,
+            sensor_height: physical_camera_default.sensor_height,
+            max_circle_of_confusion_diameter: 64.0,
+            max_depth: f32::INFINITY,
+            mode: DepthOfFieldMode::Bokeh,
+            sharpness_threshold: 0.1,
+        }
+    }
 }
 
 /// Controls the appearance of the effect.
@@ -173,12 +195,14 @@ pub struct DepthOfFieldUniform {
     /// [`DepthOfField`] for more information.
     max_depth: f32,
 
+    /// The threshold, in meters, for determining if a fragment is "sharp"
+    /// enough to be discarded when blurring background fragments.
+    sharpness_threshold: f32,
+
     /// Padding.
     pad_a: u32,
     /// Padding.
     pad_b: u32,
-    /// Padding.
-    pad_c: u32,
 }
 
 /// A key that uniquely identifies depth of field pipelines.
@@ -220,7 +244,13 @@ impl Plugin for DepthOfFieldPlugin {
         render_app
             .init_resource::<SpecializedRenderPipelines<DepthOfFieldPipeline>>()
             .init_resource::<DepthOfFieldGlobalBindGroup>()
-            .add_systems(RenderStartup, init_dof_global_bind_group_layout)
+            .add_systems(
+                RenderStartup,
+                (
+                    init_dof_global_bind_group_layout,
+                    add_depth_of_field_render_graph_edges,
+                ),
+            )
             .add_systems(ExtractSchedule, extract_depth_of_field_settings)
             .add_systems(
                 Render,
@@ -244,11 +274,43 @@ impl Plugin for DepthOfFieldPlugin {
                 Render,
                 prepare_depth_of_field_global_bind_group.in_set(RenderSystems::PrepareBindGroups),
             )
-            .add_render_graph_node::<ViewNodeRunner<DepthOfFieldNode>>(Core3d, Node3d::DepthOfField)
-            .add_render_graph_edges(
+            .add_render_graph_node::<ViewNodeRunner<DepthOfFieldNode>>(
                 Core3d,
-                (Node3d::Bloom, Node3d::DepthOfField, Node3d::Tonemapping),
+                Node3d::DepthOfField,
             );
+    }
+}
+
+fn add_depth_of_field_render_graph_edges(
+    mut render_graph: ResMut<bevy_render::render_graph::RenderGraph>,
+) {
+    let subgraph = render_graph.sub_graph_mut(Core3d);
+
+    subgraph.add_node_edge(Node3d::StartMainPassPostProcessing, Node3d::DepthOfField);
+
+    if subgraph.get_node_state(Node3d::MotionBlur).is_ok() {
+        subgraph.add_node_edge(Node3d::DepthOfField, Node3d::MotionBlur);
+    }
+
+    if subgraph.get_node_state(Node3d::Taa).is_ok() {
+        subgraph.add_node_edge(Node3d::Taa, Node3d::DepthOfField);
+    }
+
+    if subgraph.get_node_state(Node3d::DlssSuperResolution).is_ok() {
+        subgraph.add_node_edge(Node3d::DlssSuperResolution, Node3d::DepthOfField);
+    }
+
+    if subgraph
+        .get_node_state(Node3d::DlssRayReconstruction)
+        .is_ok()
+    {
+        subgraph.add_node_edge(Node3d::DlssRayReconstruction, Node3d::DepthOfField);
+    }
+
+    if subgraph.get_node_state(Node3d::Bloom).is_ok() {
+        subgraph.add_node_edge(Node3d::DepthOfField, Node3d::Bloom);
+    } else if subgraph.get_node_state(Node3d::Tonemapping).is_ok() {
+        subgraph.add_node_edge(Node3d::DepthOfField, Node3d::Tonemapping);
     }
 }
 
@@ -470,20 +532,6 @@ impl ViewNode for DepthOfFieldNode {
         }
 
         Ok(())
-    }
-}
-
-impl Default for DepthOfField {
-    fn default() -> Self {
-        let physical_camera_default = PhysicalCameraParameters::default();
-        Self {
-            focal_distance: 10.0,
-            aperture_f_stops: physical_camera_default.aperture_f_stops,
-            sensor_height: physical_camera_default.sensor_height,
-            max_circle_of_confusion_diameter: 64.0,
-            max_depth: f32::INFINITY,
-            mode: DepthOfFieldMode::Bokeh,
-        }
     }
 }
 
@@ -860,9 +908,9 @@ fn extract_depth_of_field_settings(
                     / (depth_of_field.sensor_height * depth_of_field.aperture_f_stops),
                 max_circle_of_confusion_diameter: depth_of_field.max_circle_of_confusion_diameter,
                 max_depth: depth_of_field.max_depth,
+                sharpness_threshold: depth_of_field.sharpness_threshold,
                 pad_a: 0,
                 pad_b: 0,
-                pad_c: 0,
             },
         ));
     }
